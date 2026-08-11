@@ -38,7 +38,14 @@ FR_OUTPUT = "flightrec.output"
 FR_COST_USD = "flightrec.cost_usd"
 FR_STEP_INDEX = "flightrec.step_index"
 FR_REPLAYED = "flightrec.replayed"
+FR_SERVED = "flightrec.served"
 FR_DIVERGENT = "flightrec.divergent"
+
+# ``replayed`` and ``served`` are not the same claim and must not be collapsed.
+# Every span in a replayed run is ``replayed``. Only a tool result that was read
+# back out of the recording is ``served`` -- a model call is re-executed even in
+# a faithful replay, and showing it as recorded data would misrepresent where it
+# came from on exactly the steps a user is trying to reason about.
 
 
 class SpanKind(str, Enum):

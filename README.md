@@ -57,6 +57,10 @@ thing*.
 ```bash
 flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
 flightrec serve --db flightrec.db           # open http://127.0.0.1:8000
+
+flightrec replay <run_id>                   # reproduce it, step for step
+flightrec replay <run_id> --from-step 4     # rerun live from step 4 onward
+flightrec replay <run_id> --from-step 4 --strict   # stop there instead
 ```
 
 The UI is server-rendered Jinja2 with **no JavaScript and no external requests** —
@@ -110,8 +114,33 @@ That is also why the regression test injects a deliberately coarse clock instead
 of using the real one; with the real clock it passed no matter which sort was in
 use, which is a test that proves nothing.
 
-TODO: the remaining rows, once replay lands, with the fidelity number before and
-after each.
+**The second thing that bit us: "bit-identical" is two different claims, and only
+one of them is achievable.**
+
+A replay cannot recover the recording's span IDs or its wall clock — the
+recording used real UUIDs and a real clock, and nothing brings those back. So
+the guarantee is deliberately split, and both halves are tested:
+
+* **replay vs. replay is bit-identical**, span IDs and timestamps included,
+  because the ID generator and clock are seeded from the recording;
+* **replay vs. recording is trajectory-identical** — same steps, inputs, outputs
+  and statuses.
+
+Claiming the stronger version for both would have been the silent kind of lie
+this tool exists to catch, so `step_signature()` states exactly what is compared
+and why span IDs are excluded.
+
+Three more things that had to be pinned, none of which were on the original list:
+
+| Source | How it leaked | Pinned by |
+|---|---|---|
+| Tool-result lookup key | keying the oracle by `(name, arguments)` serves the first `fetch_page` result to a later retry of the same URL, silently deleting the retry | serving in recorded **order**, with name and arguments checked afterwards — a disagreement is a loud `ReplayMismatch`, not a lookup miss |
+| Fault configuration | live steps past the edit point ran in a fault-free world, so they were not a continuation of the recorded run | fault rates recorded on the root span and restored on replay |
+| Span ID space | seeding IDs from the *agent's* seed made every replay of every same-seeded recording share span IDs — and storage writes are `INSERT OR REPLACE`, so two replays would have silently overwritten each other's steps rather than colliding | ID seed derived from the recording plus the edit, so replays of one recording stay identical and different ones stay apart |
+
+The last one is the one worth remembering: it would never have surfaced as a
+wrong replay. It would have surfaced weeks later as a run in the database with
+somebody else's steps in it.
 
 ### 2. The forward-execution problem, which has no obvious right answer
 
@@ -125,7 +154,23 @@ Rationale: the whole reason to edit step 3 is to see what happens *afterwards*; 
 there answers nothing. But a user must never be able to mistake a live-executed step for a
 recorded one, so divergence is a visible property of every step, not a footnote.
 
-TODO: revisit after using it. Note the cost implications of forward re-execution.
+What using it changed: **"divergent" was not a fine enough distinction.** The
+first version marked every span in a replay as `replayed` and everything past
+the edit point as `divergent`, which reads as "these steps came from the
+recording, those didn't" — and that is wrong. A model call is *re-executed* even
+in a perfectly faithful replay; only tool results are served from the recording.
+Labelling a re-executed model call as recorded data misrepresents provenance on
+exactly the steps a user is trying to reason about. There are now three states,
+and the timeline shows which is which:
+
+| Label | Meaning |
+|---|---|
+| `recorded` | the tool result was read back out of the recording |
+| `re-run` | re-executed, and expected to match — every model call, always |
+| `live` | past the edit point; the recording no longer applies |
+
+TODO: the cost implications of forward re-execution, measured rather than
+asserted, in step 9.
 
 ### 3. Run diffing is sequence alignment, not `zip()`
 
@@ -195,7 +240,7 @@ without an API key.
 - [x] 4. Collector + SQLite storage
 - [x] 5. Timeline UI
 - [x] 6. Token / cost rollups
-- [ ] 7. Deterministic replay
+- [x] 7. Deterministic replay
 - [ ] 8. Run diff with sequence alignment
 - [ ] 9. Measurement harness → real numbers in this README
 

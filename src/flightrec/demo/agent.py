@@ -10,7 +10,7 @@ run every time.
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from flightrec.demo.model import ModelClient, ModelResponse, StubModel
@@ -88,7 +88,8 @@ class ResearchAgent:
         self._retry_rng = make_rng(seed * 7919 + 3)
 
         self.model = model or StubModel(rng=self._model_rng)
-        self.tools = Toolbox(rng=self._tool_rng, faults=faults or FaultConfig())
+        self.faults = faults or FaultConfig()
+        self.tools = Toolbox(rng=self._tool_rng, faults=self.faults)
         self.tracer = Tracer(
             sink=sink or MemorySink(),
             clock=clock or SystemClock(),
@@ -111,7 +112,14 @@ class ResearchAgent:
             "research_agent",
             kind=SpanKind.AGENT,
             inputs=task,
-            **{"flightrec.seed": self.seed, "flightrec.max_steps": self.max_steps},
+            **{
+                "flightrec.seed": self.seed,
+                "flightrec.max_steps": self.max_steps,
+                # Recorded because replay may have to re-execute tools live past
+                # the edit point, and a live step run under a different fault
+                # configuration is not a continuation of this run.
+                "flightrec.faults": asdict(self.faults),
+            },
         ) as root:
             try:
                 for step in range(self.max_steps):
@@ -221,7 +229,10 @@ class ResearchAgent:
     def _invoke(self, name: str, arguments: dict[str, Any], span: Any) -> Any:
         if self.tool_override is not None:
             return self.tool_override(name, arguments)
+        return self.invoke_live(name, arguments, span)
 
+    def invoke_live(self, name: str, arguments: dict[str, Any], span: Any) -> Any:
+        """Actually execute a tool. The replay engine calls this past the edit point."""
         if name == "web_search":
             return self.tools.web_search(str(arguments["query"]))
         if name == "calculator":

@@ -18,7 +18,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(func=None)
 
     # Subcommands are registered as each build step lands:
-    #   replay  - replay a recorded run from step N     (step 7)
     #   diff    - align and diff two recorded runs      (step 8)
     #   bench   - reproduce the numbers in the README   (step 9)
     sub = parser.add_subparsers(dest="command", metavar="<command>")
@@ -46,6 +45,26 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("run_id")
     show.add_argument("--db", default=DEFAULT_DB)
     show.set_defaults(func=_cmd_show)
+
+    replay = sub.add_parser("replay", help="replay a recorded run, optionally from step N")
+    replay.add_argument("run_id")
+    replay.add_argument("--db", default=DEFAULT_DB)
+    replay.add_argument(
+        "--from-step",
+        type=int,
+        dest="from_step",
+        metavar="N",
+        help="re-execute live from this step onward; earlier steps come from the recording",
+    )
+    replay.add_argument(
+        "--strict",
+        action="store_true",
+        help="stop at the edit point instead of executing forward",
+    )
+    replay.add_argument("--task", help="replay with a different task prompt")
+    replay.add_argument("--temperature", type=float, help="replay at a different temperature")
+    replay.add_argument("--store", action="store_true", help="save the replay to the database")
+    replay.set_defaults(func=_cmd_replay)
 
     cost = sub.add_parser("cost", help="break down a run's spend, or compare two")
     cost.add_argument("run_id")
@@ -199,6 +218,72 @@ def _cmd_cost(args: argparse.Namespace) -> int:
                 )
         else:
             print("  no per-model or per-tool difference")
+    return 0
+
+
+def _cmd_replay(args: argparse.Namespace) -> int:
+    from flightrec.replay import ReplayMismatch, replay_run
+    from flightrec.spans import FR_DIVERGENT, FR_OUTPUT, FR_SERVED, SpanStatus
+    from flightrec.storage import RunStore
+
+    store = RunStore(args.db)
+    original = store.get_run(args.run_id)
+    if original is None:
+        store.close()
+        print(f"no run {args.run_id!r} in {args.db}")
+        return 1
+
+    try:
+        replay = replay_run(
+            original,
+            from_step=args.from_step,
+            strict=args.strict,
+            task=args.task,
+            temperature=args.temperature,
+        )
+    except ReplayMismatch as exc:
+        store.close()
+        print(f"REPLAY FAILED: {exc}")
+        return 2
+
+    print(f"replaying {original.run_id} -> {replay.run.run_id}")
+    for index, step in enumerate(replay.run.steps()):
+        # Three distinct provenances, and conflating them would be the exact
+        # confusion this tool exists to prevent: "recorded" means the result was
+        # read back out of the recording, "re-run" means it was re-executed and
+        # is expected to match, "live" means the recording no longer applies.
+        if step.attr(FR_DIVERGENT):
+            source = "live"
+        elif step.attr(FR_SERVED):
+            source = "recorded"
+        else:
+            source = "re-run"
+        marker = "!" if step.status is SpanStatus.ERROR else " "
+        output = str(step.attr(FR_OUTPUT) or step.status_message or "")
+        print(f" {marker} [{index:>2}] {source:<8} {step.name:<18} {output[:56]}")
+
+    print(
+        f"\n{replay.served} step(s) served from the recording, "
+        f"{replay.live} executed live"
+    )
+    if replay.stopped:
+        print("stopped at the edit point (--strict); nothing past it was executed")
+    elif replay.edits or replay.from_step is not None:
+        divergence = replay.divergence_step
+        print(
+            f"first divergence from the recording: step {divergence}"
+            if divergence is not None
+            else "the edit changed nothing: the trajectory is identical"
+        )
+    elif replay.faithful:
+        print("FAITHFUL: the replayed trajectory is identical to the recording")
+    else:
+        print(f"NOT FAITHFUL: diverged at step {replay.divergence_step}")
+
+    if args.store:
+        store.add_run(replay.run)
+        print(f"stored:   {args.db}  run_id={replay.run.run_id}")
+    store.close()
     return 0
 
 
