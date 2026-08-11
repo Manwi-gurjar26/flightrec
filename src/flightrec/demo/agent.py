@@ -24,8 +24,6 @@ from flightrec.spans import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_SYSTEM,
     GEN_AI_TOOL_NAME,
-    GEN_AI_USAGE_INPUT_TOKENS,
-    GEN_AI_USAGE_OUTPUT_TOKENS,
     Run,
     SpanKind,
 )
@@ -163,10 +161,14 @@ class ResearchAgent:
             },
         ) as span:
             response = self.model.complete(messages, temperature=self.temperature)
+            self.tracer.record_usage(
+                span,
+                model=getattr(self.model, "name", None),
+                input_tokens=response.input_tokens,
+                output_tokens=response.output_tokens,
+            )
             span.attributes.update(
                 {
-                    GEN_AI_USAGE_INPUT_TOKENS: response.input_tokens,
-                    GEN_AI_USAGE_OUTPUT_TOKENS: response.output_tokens,
                     GEN_AI_RESPONSE_FINISH_REASONS: [response.finish_reason],
                     FR_OUTPUT: response.text,
                 }

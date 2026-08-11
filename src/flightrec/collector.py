@@ -14,6 +14,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from flightrec.pricing import format_usd
+from flightrec.rollup import RunCost, build_rollup
 from flightrec.spans import Run, Span, SpanNode
 from flightrec.storage import RunStore, RunSummary
 from flightrec.web import build_timeline, format_duration, format_timestamp
@@ -49,7 +51,9 @@ def create_app(store: RunStore | None = None, db_path: str | Path = "flightrec.d
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     templates.env.globals.update(
-        format_duration=format_duration, format_timestamp=format_timestamp
+        format_duration=format_duration,
+        format_timestamp=format_timestamp,
+        format_usd=format_usd,
     )
 
     def get_store() -> RunStore:
@@ -73,7 +77,9 @@ def create_app(store: RunStore | None = None, db_path: str | Path = "flightrec.d
         if run is None:
             raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
         return templates.TemplateResponse(
-            request, "timeline.html", {"view": build_timeline(run)}
+            request,
+            "timeline.html",
+            {"view": build_timeline(run), "cost": build_rollup(run)},
         )
 
     @app.get("/healthz")

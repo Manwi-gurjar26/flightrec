@@ -15,8 +15,80 @@
   </div>
   <div class="stat"><div class="k">Retries</div><div class="v">{{ view.retry_count }}</div></div>
   <div class="stat"><div class="k">Tokens</div><div class="v">{{ '{:,}'.format(view.total_tokens) }}</div></div>
+  <div class="stat"><div class="k">Cost</div><div class="v">{{ format_usd(cost.total_cost_usd) }}</div></div>
   <div class="stat"><div class="k">Duration</div><div class="v">{{ format_duration(view.duration_ms) }}</div></div>
 </div>
+
+{% if not cost.priced_completely %}
+<p class="pill warn" style="margin-bottom:16px">
+  cost incomplete &mdash; {{ cost.unpriced_calls }} call(s) used a model missing
+  from the price table, covering {{ '{:,}'.format(cost.unpriced_tokens) }} tokens
+</p>
+{% endif %}
+
+<details class="step" style="margin-bottom:18px">
+  <summary>
+    <span class="seq">$</span>
+    <span class="pill">cost</span>
+    <span class="sname">Where the spend went
+      <span class="sum">
+        {{ cost.by_kind|length }} kind(s),
+        {{ cost.by_model|length }} model(s),
+        {{ cost.by_tool|length }} tool(s)
+        {%- if cost.post_failure_cost_usd %}, {{ cost.post_failure_share }}% after first failure{% endif %}
+      </span>
+    </span>
+    <span class="smeta">{{ format_usd(cost.total_cost_usd) }}</span>
+  </summary>
+  <div class="detail">
+    {% macro lines(rows, title) %}
+      {% if rows %}
+      <h4>{{ title }}</h4>
+      <table class="kv">
+        <tr class="muted">
+          <td>&nbsp;</td><td class="right">calls</td><td class="right">tokens</td>
+          <td class="right">time</td><td class="right">cost</td><td class="right">share</td>
+        </tr>
+        {% for line in rows %}
+        <tr>
+          <td style="width:auto">{{ line.label }}{% if line.errors %}
+              <span class="pill error">{{ line.errors }} err</span>{% endif %}</td>
+          <td class="right">{{ line.calls }}</td>
+          <td class="right">{{ '{:,}'.format(line.tokens) }}</td>
+          <td class="right">{{ format_duration(line.duration_ms) }}</td>
+          <td class="right">{{ format_usd(line.cost_usd) }}</td>
+          <td class="right">{{ line.share_of(cost.total_cost_usd) }}%</td>
+        </tr>
+        {% endfor %}
+      </table>
+      {% endif %}
+    {% endmacro %}
+
+    {{ lines(cost.by_kind, 'By kind') }}
+    {{ lines(cost.by_model, 'By model') }}
+    {{ lines(cost.by_tool, 'By tool') }}
+
+    <h4>Attributed to going wrong</h4>
+    <table class="kv">
+      <tr><td>failed steps</td>
+          <td>{{ cost.error_count }} &mdash; {{ format_usd(cost.error_cost_usd) }},
+              {{ format_duration(cost.error_duration_ms) }}</td></tr>
+      <tr><td>retries</td>
+          <td>{{ cost.retry_count }} &mdash; {{ format_duration(cost.retry_delay_ms) }} of backoff</td></tr>
+      <tr><td>spend after first failure</td>
+          <td>{{ cost.post_failure_calls }} model call(s),
+              {{ '{:,}'.format(cost.post_failure_tokens) }} tokens,
+              {{ format_usd(cost.post_failure_cost_usd) }}
+              ({{ cost.post_failure_share }}% of the run)</td></tr>
+    </table>
+    <p class="muted" style="font-size:12px;margin-top:8px">
+      The last row is an <em>upper bound</em>, not a measurement. Everything after
+      the first failure is counted, and some of it would have been spent anyway
+      &mdash; there is no way to know what the run would have cost had the tool
+      worked, because the agent would have taken a different path.
+    </p>
+  </div>
+</details>
 
 {% if not view.complete %}
 <p class="pill warn" style="margin-bottom:16px">

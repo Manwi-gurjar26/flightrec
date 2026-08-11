@@ -17,6 +17,7 @@
       <th class="right">Steps</th>
       <th class="right">Errors</th>
       <th class="right">Tokens</th>
+      <th class="right">Cost</th>
       <th class="right">Duration</th>
       <th>Recorded</th>
     </tr>
@@ -34,6 +35,7 @@
       <td class="right mono">{{ s.step_count }}</td>
       <td class="right mono">{{ s.error_count or '' }}</td>
       <td class="right mono">{{ '{:,}'.format(s.total_tokens) }}</td>
+      <td class="right mono">{{ format_usd(s.total_cost_usd) }}</td>
       <td class="right mono">{{ format_duration(s.duration_ms) }}</td>
       <td class="mono muted">{{ format_timestamp(s.created_at) }}</td>
     </tr>

@@ -194,7 +194,7 @@ without an API key.
 - [x] 3. Demo agent that genuinely fails
 - [x] 4. Collector + SQLite storage
 - [x] 5. Timeline UI
-- [ ] 6. Token / cost rollups
+- [x] 6. Token / cost rollups
 - [ ] 7. Deterministic replay
 - [ ] 8. Run diff with sequence alignment
 - [ ] 9. Measurement harness → real numbers in this README

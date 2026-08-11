@@ -47,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
     show.add_argument("--db", default=DEFAULT_DB)
     show.set_defaults(func=_cmd_show)
 
+    cost = sub.add_parser("cost", help="break down a run's spend, or compare two")
+    cost.add_argument("run_id")
+    cost.add_argument("against", nargs="?", help="baseline run to compare against")
+    cost.add_argument("--db", default=DEFAULT_DB)
+    cost.set_defaults(func=_cmd_cost)
+
     return parser
 
 
@@ -110,6 +116,89 @@ def _cmd_runs(args: argparse.Namespace) -> int:
             f"{s.total_tokens:>7}  {s.root_name or '-'}"
         )
     store.close()
+    return 0
+
+
+def _cmd_cost(args: argparse.Namespace) -> int:
+    from flightrec.pricing import format_usd
+    from flightrec.rollup import CostComparison, build_rollup
+    from flightrec.storage import RunStore
+
+    store = RunStore(args.db)
+    run = store.get_run(args.run_id)
+    baseline_run = store.get_run(args.against) if args.against else None
+    store.close()
+
+    if run is None:
+        print(f"no run {args.run_id!r} in {args.db}")
+        return 1
+    if args.against and baseline_run is None:
+        print(f"no run {args.against!r} in {args.db}")
+        return 1
+
+    rollup = build_rollup(run)
+
+    def table(title: str, lines: list) -> None:
+        if not lines:
+            return
+        print(f"\n{title}")
+        print(f"  {'':<20} {'CALLS':>6} {'TOKENS':>8} {'TIME':>9} {'COST':>12} {'SHARE':>7}")
+        for line in lines:
+            from flightrec.web import format_duration
+
+            print(
+                f"  {line.label:<20} {line.calls:>6} {line.tokens:>8} "
+                f"{format_duration(line.duration_ms):>9} "
+                f"{format_usd(line.cost_usd):>12} "
+                f"{line.share_of(rollup.total_cost_usd):>6}%"
+            )
+
+    print(f"run {rollup.run_id}")
+    print(
+        f"  {rollup.total_tokens:,} tokens "
+        f"({rollup.total_input_tokens:,} in / {rollup.total_output_tokens:,} out)   "
+        f"{format_usd(rollup.total_cost_usd)}"
+    )
+    if not rollup.priced_completely:
+        print(
+            f"  WARNING: {rollup.unpriced_calls} call(s) used an unpriced model, "
+            f"covering {rollup.unpriced_tokens:,} tokens -- this total is incomplete"
+        )
+
+    table("BY KIND", rollup.by_kind)
+    table("BY MODEL", rollup.by_model)
+    table("BY TOOL", rollup.by_tool)
+
+    print("\nATTRIBUTED TO GOING WRONG")
+    print(f"  failed steps        {rollup.error_count}")
+    print(f"  retries             {rollup.retry_count}")
+    print(
+        f"  after first failure {rollup.post_failure_calls} call(s), "
+        f"{rollup.post_failure_tokens:,} tokens, "
+        f"{format_usd(rollup.post_failure_cost_usd)} "
+        f"({rollup.post_failure_share}% of the run) -- upper bound"
+    )
+
+    if baseline_run is not None:
+        comparison = CostComparison(build_rollup(baseline_run), rollup)
+        ratio = comparison.cost_ratio
+        print(f"\nVERSUS {baseline_run.run_id}")
+        print(
+            f"  tokens {comparison.token_delta:+,}   "
+            f"cost {format_usd(abs(comparison.cost_delta))} "
+            f"{'more' if comparison.cost_delta >= 0 else 'less'}"
+            + (f"   ({ratio}x)" if ratio else "")
+        )
+        movers = [row for row in comparison.by_model_delta() + comparison.by_tool_delta() if row[1] or row[2]]
+        if movers:
+            print("  biggest movers:")
+            for label, cost_delta, token_delta in movers[:6]:
+                print(
+                    f"    {label:<20} {format_usd(abs(cost_delta)):>12} "
+                    f"{'+' if cost_delta >= 0 else '-'}   {token_delta:+,} tokens"
+                )
+        else:
+            print("  no per-model or per-tool difference")
     return 0
 
 

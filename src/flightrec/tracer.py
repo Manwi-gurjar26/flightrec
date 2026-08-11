@@ -51,12 +51,16 @@ class Tracer:
         clock: Clock | None = None,
         id_generator: IdGenerator | None = None,
         trace_id: str | None = None,
+        prices: "PriceTable | None" = None,
     ) -> None:
+        from flightrec.pricing import PriceTable
+
         self.sink: Sink = sink if sink is not None else MemorySink()
         self.clock: Clock = clock if clock is not None else SystemClock()
         self.ids: IdGenerator = (
             id_generator if id_generator is not None else RandomIdGenerator()
         )
+        self.prices = prices if prices is not None else PriceTable()
         self.trace_id = trace_id or self.ids.new_id()
         # itertools.count().__next__ is atomic in CPython, so concurrent spans
         # still get distinct, ordered sequence numbers without a lock.
@@ -155,6 +159,21 @@ class Tracer:
                 },
             )
         )
+
+    def record_usage(
+        self,
+        span: Span,
+        model: str | None,
+        input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        """Record token usage on a model span and price it.
+
+        Cost is fixed at record time from the table in force then, and the rate
+        applied is written alongside it. See :mod:`flightrec.pricing` for why
+        deriving cost at read time would quietly rewrite history.
+        """
+        self.prices.apply(span, model, input_tokens, output_tokens)
 
     @staticmethod
     def set_output(span: Span, value: Any) -> None:
