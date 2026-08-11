@@ -13,6 +13,7 @@ around.
 from __future__ import annotations
 
 import functools
+import itertools
 import traceback
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -57,6 +58,9 @@ class Tracer:
             id_generator if id_generator is not None else RandomIdGenerator()
         )
         self.trace_id = trace_id or self.ids.new_id()
+        # itertools.count().__next__ is atomic in CPython, so concurrent spans
+        # still get distinct, ordered sequence numbers without a lock.
+        self._sequence = itertools.count()
 
     @contextmanager
     def span(
@@ -78,6 +82,7 @@ class Tracer:
             parent_span_id=parent.span_id if parent else None,
             name=name,
             kind=kind,
+            sequence=next(self._sequence),
             start_time=self.clock.now(),
             attributes={GEN_AI_OPERATION_NAME: kind.value, **attributes},
         )

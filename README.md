@@ -75,7 +75,33 @@ The sources of non-determinism, each of which has to be independently pinned:
 | Retry/backoff | jitter changes the call sequence | seeded RNG, recorded seed |
 | Iteration order | `set` / `dict` ordering across processes | `PYTHONHASHSEED` recorded and forced |
 
-TODO: which of these actually bit us, and what the fidelity number was before and after each.
+**The one that actually bit us, and it was not on the list: clock resolution.**
+
+The first recorded trajectory came back with the calculator call *ahead of the
+page fetch that produced its operands*. Nothing was wrong with the agent. The
+trajectory was sorted by `(start_time, span_id)`, `time.time()` on Windows
+resolves to about 15.6ms, and agent steps finish in microseconds — so eleven
+spans shared three distinct timestamps and the tiebreaker was a random UUID.
+
+Two fixes, because one was not enough:
+
+1. `SystemClock` anchors to the wall clock once and advances with
+   `perf_counter()`. Sub-microsecond resolution, monotonic, still reads as epoch
+   seconds. This also stopped every short span reporting a duration of exactly
+   zero.
+2. More importantly, **ordering no longer depends on time at all.** Each span
+   carries a monotonic `sequence` counter assigned at start, and that is the
+   ordering authority. Timestamps are for display and duration only.
+
+Fix 1 alone would have hidden the bug rather than fixed it — the clock was
+precise enough afterwards that time-based sorting appeared to work on this
+machine, and would have broken again on a coarser platform or across processes.
+That is also why the regression test injects a deliberately coarse clock instead
+of using the real one; with the real clock it passed no matter which sort was in
+use, which is a test that proves nothing.
+
+TODO: the remaining rows, once replay lands, with the fidelity number before and
+after each.
 
 ### 2. The forward-execution problem, which has no obvious right answer
 
@@ -155,7 +181,7 @@ without an API key.
 
 - [x] 1. Repo skeleton + README contract
 - [x] 2. Span model + tracing SDK
-- [ ] 3. Demo agent that genuinely fails
+- [x] 3. Demo agent that genuinely fails
 - [ ] 4. Collector + SQLite storage
 - [ ] 5. Timeline UI
 - [ ] 6. Token / cost rollups

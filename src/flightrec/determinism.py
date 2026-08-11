@@ -25,10 +25,27 @@ class Clock(Protocol):
 
 
 class SystemClock:
-    """Real time. Used when recording."""
+    """Real time, at high resolution. Used when recording.
+
+    Not simply ``time.time()``. On Windows that has a resolution of about
+    15.6ms, and agent steps routinely complete in microseconds -- so whole
+    groups of spans get *identical* start times, every sub-millisecond duration
+    reads as exactly zero, and any ordering that falls back on a tiebreaker is
+    scrambled. This cost us a real bug: the first recorded trajectory came out
+    with the calculator call ahead of the page fetch that produced its operands.
+
+    The fix is the standard one: anchor to the wall clock once, then advance
+    using a monotonic high-resolution counter. The result still reads as epoch
+    seconds, but it is precise and cannot go backwards when the system clock is
+    adjusted mid-run.
+    """
+
+    def __init__(self) -> None:
+        self._epoch_anchor = time.time()
+        self._perf_anchor = time.perf_counter()
 
     def now(self) -> float:
-        return time.time()
+        return self._epoch_anchor + (time.perf_counter() - self._perf_anchor)
 
 
 class VirtualClock:

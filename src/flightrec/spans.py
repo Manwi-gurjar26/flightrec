@@ -78,6 +78,16 @@ class Span(BaseModel):
     name: str
     kind: SpanKind
 
+    sequence: int = 0
+    """Monotonic counter assigned when the span starts. The ordering authority.
+
+    Timestamps are for *display and duration*, never for ordering. Clock
+    resolution varies by platform, spans can start within the same tick, and
+    across processes the clocks are not even comparable -- so a tool that sorts
+    a trajectory by time will eventually show a user the wrong story about what
+    their agent did. A counter has none of those failure modes.
+    """
+
     start_time: float
     end_time: float | None = None
 
@@ -161,11 +171,11 @@ class Run(BaseModel):
                 parent.children.append(node)
 
         def sort_children(node: SpanNode) -> None:
-            node.children.sort(key=lambda n: n.span.start_time)
+            node.children.sort(key=lambda n: n.span.sequence)
             for child in node.children:
                 sort_children(child)
 
-        roots.sort(key=lambda n: n.span.start_time)
+        roots.sort(key=lambda n: n.span.sequence)
         for root in roots:
             sort_children(root)
         return roots
@@ -181,7 +191,7 @@ class Run(BaseModel):
         significant = [
             s for s in self.spans if s.kind in (SpanKind.LLM, SpanKind.TOOL)
         ]
-        return sorted(significant, key=lambda s: (s.start_time, s.span_id))
+        return sorted(significant, key=lambda s: s.sequence)
 
     @property
     def total_tokens(self) -> int:
