@@ -153,8 +153,8 @@ without an API key.
 
 ## Build status
 
-- [ ] 1. Repo skeleton + README contract
-- [ ] 2. Span model + tracing SDK
+- [x] 1. Repo skeleton + README contract
+- [x] 2. Span model + tracing SDK
 - [ ] 3. Demo agent that genuinely fails
 - [ ] 4. Collector + SQLite storage
 - [ ] 5. Timeline UI
