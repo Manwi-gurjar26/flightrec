@@ -182,7 +182,7 @@ without an API key.
 - [x] 1. Repo skeleton + README contract
 - [x] 2. Span model + tracing SDK
 - [x] 3. Demo agent that genuinely fails
-- [ ] 4. Collector + SQLite storage
+- [x] 4. Collector + SQLite storage
 - [ ] 5. Timeline UI
 - [ ] 6. Token / cost rollups
 - [ ] 7. Deterministic replay

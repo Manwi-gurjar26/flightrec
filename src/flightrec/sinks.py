@@ -65,6 +65,83 @@ class JSONLSink:
         self.close()
 
 
+class HTTPSink:
+    """Buffers spans and posts them to the collector in batches.
+
+    **This sink must never take the agent down with it.** An observability tool
+    that raises when its backend is unreachable has made the system it observes
+    strictly less reliable, which is an unarguable case for ripping it out. So
+    every failure here is swallowed and counted in ``dropped``, and the count is
+    exposed rather than hidden -- silently losing data is bad, but crashing a
+    production agent because a dashboard is down is worse.
+    """
+
+    def __init__(
+        self,
+        url: str = "http://127.0.0.1:8000",
+        batch_size: int = 32,
+        timeout: float = 2.0,
+    ) -> None:
+        self.url = url.rstrip("/")
+        self.batch_size = batch_size
+        self.timeout = timeout
+        self.dropped = 0
+        self.sent = 0
+        self._buffer: list[Span] = []
+        self._lock = threading.Lock()
+
+    def emit(self, span: Span) -> None:
+        with self._lock:
+            self._buffer.append(span)
+            ready = len(self._buffer) >= self.batch_size
+        if ready:
+            self.flush()
+
+    def flush(self) -> None:
+        with self._lock:
+            batch, self._buffer = self._buffer, []
+        if not batch:
+            return
+
+        try:
+            import httpx
+
+            payload = {"spans": [s.model_dump(mode="json") for s in batch]}
+            response = httpx.post(
+                f"{self.url}/v1/spans", json=payload, timeout=self.timeout
+            )
+            response.raise_for_status()
+            self.sent += len(batch)
+        except Exception:
+            # Deliberately broad. See the class docstring: there is no exception
+            # from a telemetry backend that justifies breaking the caller.
+            self.dropped += len(batch)
+
+    def close(self) -> None:
+        self.flush()
+
+    def __enter__(self) -> "HTTPSink":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+
+class TeeSink:
+    """Fans spans out to several sinks. Used to record locally *and* ship."""
+
+    def __init__(self, *sinks: Sink) -> None:
+        self.sinks = list(sinks)
+
+    def emit(self, span: Span) -> None:
+        for sink in self.sinks:
+            sink.emit(span)
+
+    def close(self) -> None:
+        for sink in self.sinks:
+            sink.close()
+
+
 def read_jsonl(path: str | Path) -> list[Span]:
     """Load spans back from a JSONL recording, skipping any truncated tail."""
     spans: list[Span] = []

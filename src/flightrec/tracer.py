@@ -93,21 +93,7 @@ class Tracer:
         try:
             yield span
         except BaseException as exc:
-            span.status = SpanStatus.ERROR
-            span.status_message = f"{type(exc).__name__}: {exc}"
-            span.events.append(
-                SpanEvent(
-                    name="exception",
-                    timestamp=self.clock.now(),
-                    attributes={
-                        "exception.type": type(exc).__name__,
-                        "exception.message": str(exc),
-                        "exception.stacktrace": "".join(
-                            traceback.format_exception_only(type(exc), exc)
-                        ).strip(),
-                    },
-                )
-            )
+            self.record_exception(span, exc)
             raise  # never swallow: the tool must not change what it observes
         finally:
             _current_span.reset(token)
@@ -142,6 +128,33 @@ class Tracer:
             return wrapper  # type: ignore[return-value]
 
         return decorator
+
+    def record_exception(self, span: Span, exc: BaseException) -> None:
+        """Mark a span as failed and attach the exception detail.
+
+        Called automatically when an exception escapes a span, and *manually* by
+        callers that catch a failure themselves. Agent frameworks routinely
+        catch tool errors and hand them back to the model rather than letting
+        them propagate -- that is not an edge case, it is the main path, and it
+        is exactly how an agent talks itself into a wrong answer. Both routes
+        have to produce identically detailed spans, or the timeline shows a red
+        marker with nothing behind it on the failures that matter most.
+        """
+        span.status = SpanStatus.ERROR
+        span.status_message = f"{type(exc).__name__}: {exc}"
+        span.events.append(
+            SpanEvent(
+                name="exception",
+                timestamp=self.clock.now(),
+                attributes={
+                    "exception.type": type(exc).__name__,
+                    "exception.message": str(exc),
+                    "exception.stacktrace": "".join(
+                        traceback.format_exception_only(type(exc), exc)
+                    ).strip(),
+                },
+            )
+        )
 
     @staticmethod
     def set_output(span: Span, value: Any) -> None:

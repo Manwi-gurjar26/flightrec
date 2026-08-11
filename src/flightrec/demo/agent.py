@@ -28,7 +28,6 @@ from flightrec.spans import (
     GEN_AI_USAGE_OUTPUT_TOKENS,
     Run,
     SpanKind,
-    SpanStatus,
 )
 from flightrec.sinks import MemorySink, Sink
 from flightrec.tracer import Tracer
@@ -198,8 +197,7 @@ class ResearchAgent:
             try:
                 result = self._invoke(name, arguments, span)
             except (ToolError, TransientError) as exc:
-                span.status = SpanStatus.ERROR
-                span.status_message = f"{type(exc).__name__}: {exc}"
+                self.tracer.record_exception(span, exc)
                 span.attributes[FR_OUTPUT] = None
                 return {
                     "role": "tool",

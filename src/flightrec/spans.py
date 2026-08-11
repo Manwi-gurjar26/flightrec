@@ -193,6 +193,29 @@ class Run(BaseModel):
         ]
         return sorted(significant, key=lambda s: s.sequence)
 
+    def ordered_spans(self) -> list[Span]:
+        """Spans in execution order.
+
+        ``self.spans`` is in *emission* order, which is not execution order: a
+        span is emitted when it closes, so children always land before their
+        parents and the root agent span is last. That is fine for a log and
+        useless for comparison.
+        """
+        return sorted(self.spans, key=lambda s: s.sequence)
+
+    def canonical_json(self) -> str:
+        """A stable serialisation of the run, independent of list order.
+
+        Two recordings of the same execution must produce identical strings
+        here even if their spans arrived in a different order -- over HTTP they
+        routinely will, since batches can be reordered or retried. This is the
+        comparison that replay fidelity is measured with, so it has to depend on
+        nothing but the run itself.
+        """
+        return Run(
+            run_id=self.run_id, spans=self.ordered_spans(), metadata=self.metadata
+        ).model_dump_json()
+
     @property
     def total_tokens(self) -> int:
         return sum(s.total_tokens for s in self.spans)
