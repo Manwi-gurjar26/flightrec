@@ -9,11 +9,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from flightrec.spans import Run, Span, SpanNode
 from flightrec.storage import RunStore, RunSummary
+from flightrec.web import build_timeline, format_duration, format_timestamp
+
+TEMPLATES_DIR = Path(__file__).parent / "templates"
 
 
 class SpanBatch(BaseModel):
@@ -40,9 +45,36 @@ def create_app(store: RunStore | None = None, db_path: str | Path = "flightrec.d
         version="0.1.0",
     )
     app.state.store = resolved
+    app.state.db_path = str(db_path)
+
+    templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+    templates.env.globals.update(
+        format_duration=format_duration, format_timestamp=format_timestamp
+    )
 
     def get_store() -> RunStore:
         return app.state.store
+
+    # -- the UI ---------------------------------------------------------------
+
+    @app.get("/", response_class=HTMLResponse)
+    def index(request: Request, store: RunStore = Depends(get_store)) -> Any:
+        return templates.TemplateResponse(
+            request,
+            "runs.html",
+            {"summaries": store.list_runs(limit=100), "db_path": app.state.db_path},
+        )
+
+    @app.get("/runs/{run_id}", response_class=HTMLResponse)
+    def timeline(
+        request: Request, run_id: str, store: RunStore = Depends(get_store)
+    ) -> Any:
+        run = store.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+        return templates.TemplateResponse(
+            request, "timeline.html", {"view": build_timeline(run)}
+        )
 
     @app.get("/healthz")
     def healthz(store: RunStore = Depends(get_store)) -> dict[str, Any]:

@@ -54,6 +54,16 @@ thing*.
 - **Diff.** Put two runs side by side, align their steps properly, and point at the first
   genuine divergence.
 
+```bash
+flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
+flightrec serve --db flightrec.db           # open http://127.0.0.1:8000
+```
+
+The UI is server-rendered Jinja2 with **no JavaScript and no external requests** —
+expandable steps are native `<details>` elements. The collector is a local tool that
+has to work offline, and the alternative was vendoring a JS library to reimplement a
+browser primitive.
+
 ## Why this was hard
 
 *(The three sections below are the point of the project. They get filled in with what
@@ -183,7 +193,7 @@ without an API key.
 - [x] 2. Span model + tracing SDK
 - [x] 3. Demo agent that genuinely fails
 - [x] 4. Collector + SQLite storage
-- [ ] 5. Timeline UI
+- [x] 5. Timeline UI
 - [ ] 6. Token / cost rollups
 - [ ] 7. Deterministic replay
 - [ ] 8. Run diff with sequence alignment

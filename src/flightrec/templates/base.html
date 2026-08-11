@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}flightrec{% endblock %}</title>
+<style>
+/* Self-contained on purpose: the collector is a local tool and must work with
+   no network. No CDN fonts, no CDN scripts, no build step. */
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --border: #e3e2df; --text: #1b1b19;
+  --muted: #6f6d68; --accent: #2f6f4f; --error: #b3261e; --warn: #9a6700;
+  --model: #3b5bdb; --tool: #7048e8; --bar: #e9e8e5;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "SF Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16161a; --panel: #1e1e24; --border: #32323a; --text: #e8e7e4;
+    --muted: #9b9992; --accent: #6cc296; --error: #ef8a83; --warn: #d9a441;
+    --model: #90a8ff; --tool: #b79bff; --bar: #2b2b33;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+a { color: inherit; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 28px 20px 64px; }
+header.top { border-bottom: 1px solid var(--border); margin-bottom: 22px; padding-bottom: 14px; }
+header.top h1 { font-size: 17px; margin: 0 0 3px; letter-spacing: -0.01em; }
+header.top h1 a { text-decoration: none; }
+header.top p { margin: 0; color: var(--muted); font-size: 13px; }
+.mono { font-family: var(--mono); }
+.muted { color: var(--muted); }
+
+/* summary stats */
+.stats { display: flex; flex-wrap: wrap; gap: 26px; margin: 0 0 22px; }
+.stat .k { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.stat .v { font-size: 19px; font-family: var(--mono); }
+.v.error { color: var(--error); }
+.v.ok { color: var(--accent); }
+
+.pill { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px;
+        border: 1px solid var(--border); font-family: var(--mono); }
+.pill.model { color: var(--model); border-color: color-mix(in srgb, var(--model) 40%, transparent); }
+.pill.tool  { color: var(--tool);  border-color: color-mix(in srgb, var(--tool) 40%, transparent); }
+.pill.error { color: var(--error); border-color: color-mix(in srgb, var(--error) 45%, transparent); }
+.pill.warn  { color: var(--warn);  border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+.pill.ok    { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+     color: var(--muted); font-weight: 500; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+tr:hover td { background: var(--panel); }
+.right { text-align: right; }
+.bar { height: 5px; background: var(--bar); border-radius: 3px; overflow: hidden; min-width: 60px; }
+.bar > i { display: block; height: 100%; background: var(--muted); }
+.bar.tok > i { background: var(--model); }
+
+/* timeline steps */
+.step { border: 1px solid var(--border); border-radius: 7px; background: var(--panel);
+        margin-bottom: 7px; overflow: hidden; }
+.step.err { border-color: color-mix(in srgb, var(--error) 45%, var(--border)); }
+.step > summary { list-style: none; cursor: pointer; padding: 9px 12px;
+                  display: grid; grid-template-columns: 30px 58px 1fr auto; gap: 12px; align-items: center; }
+.step > summary::-webkit-details-marker { display: none; }
+.step > summary:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.seq { font-family: var(--mono); color: var(--muted); font-size: 12px; text-align: right; }
+.sname { font-family: var(--mono); font-size: 13px; overflow: hidden;
+         text-overflow: ellipsis; white-space: nowrap; }
+.sname .sum { color: var(--muted); margin-left: 8px; }
+.smeta { display: flex; gap: 10px; align-items: center; font-family: var(--mono);
+         font-size: 11px; color: var(--muted); white-space: nowrap; }
+.gutter { width: 3px; align-self: stretch; }
+.detail { padding: 4px 12px 14px 12px; border-top: 1px solid var(--border); }
+.detail h4 { margin: 12px 0 4px; font-size: 11px; text-transform: uppercase;
+             letter-spacing: .06em; color: var(--muted); font-weight: 500; }
+pre { margin: 0; padding: 9px 11px; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 5px; font-family: var(--mono); font-size: 12px;
+      white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto; }
+pre.err { border-color: color-mix(in srgb, var(--error) 45%, var(--border)); color: var(--error); }
+.kv { width: 100%; font-size: 12px; font-family: var(--mono); }
+.kv td { padding: 3px 8px 3px 0; border: 0; }
+.kv td:first-child { color: var(--muted); width: 38%; }
+.empty { color: var(--muted); padding: 34px 0; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1><a href="/">flightrec</a></h1>
+    <p>{% block subtitle %}a flight recorder for LLM agents{% endblock %}</p>
+  </header>
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>

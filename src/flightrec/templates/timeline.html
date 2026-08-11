@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}run {{ view.run_id[:12] }} - flightrec{% endblock %}
+{% block subtitle %}<span class="mono">{{ view.run_id }}</span>{% endblock %}
+
+{% block content %}
+<div class="stats">
+  <div class="stat">
+    <div class="k">Status</div>
+    <div class="v {{ 'error' if view.status == 'error' else 'ok' }}">{{ view.status }}</div>
+  </div>
+  <div class="stat"><div class="k">Steps</div><div class="v">{{ view.step_count }}</div></div>
+  <div class="stat">
+    <div class="k">Errors</div>
+    <div class="v {{ 'error' if view.error_count }}">{{ view.error_count }}</div>
+  </div>
+  <div class="stat"><div class="k">Retries</div><div class="v">{{ view.retry_count }}</div></div>
+  <div class="stat"><div class="k">Tokens</div><div class="v">{{ '{:,}'.format(view.total_tokens) }}</div></div>
+  <div class="stat"><div class="k">Duration</div><div class="v">{{ format_duration(view.duration_ms) }}</div></div>
+</div>
+
+{% if not view.complete %}
+<p class="pill warn" style="margin-bottom:16px">
+  partial recording &mdash; the root span never closed, so this run was cut short
+</p>
+{% endif %}
+
+{% for step in view.steps %}
+<details class="step {{ 'err' if step.is_error }}">
+  <summary>
+    <span class="seq">{{ step.sequence }}</span>
+    <span class="pill {{ 'tool' if step.kind == 'execute_tool' else 'model' }}">{{ step.kind_label }}</span>
+    <span class="sname">
+      {{ step.name }}
+      <span class="sum">{{ step.summary[:90] }}{{ '...' if step.summary|length > 90 }}</span>
+    </span>
+    <span class="smeta">
+      {% if step.confabulated %}<span class="pill warn" title="this step invented data instead of using a tool result">invented</span>{% endif %}
+      {% if step.retry_count %}<span class="pill warn">{{ step.retry_count }} retry</span>{% endif %}
+      {% if step.is_error %}<span class="pill error">error</span>{% endif %}
+      {% if step.tokens %}<span title="{{ step.tokens }} tokens">{{ step.tokens }}t</span>
+      <span class="bar tok" style="width:52px" title="{{ step.tokens }} tokens"><i style="width:{{ step.token_pct }}%"></i></span>{% endif %}
+      <span>{{ format_duration(step.duration_ms) }}</span>
+      <span class="bar" style="width:52px"><i style="width:{{ step.duration_pct }}%"></i></span>
+    </span>
+  </summary>
+
+  <div class="detail">
+    {% if step.input_text %}
+      <h4>Input</h4>
+      <pre>{{ step.input_text }}</pre>
+    {% endif %}
+
+    {% if step.is_error %}
+      <h4>Error</h4>
+      <pre class="err">{{ step.summary }}</pre>
+    {% elif step.output_text %}
+      <h4>Output</h4>
+      <pre>{{ step.output_text }}</pre>
+    {% endif %}
+
+    {% if step.events %}
+      <h4>Events</h4>
+      <table class="kv">
+        {% for event in step.events %}
+          <tr>
+            <td>{{ event.name }}</td>
+            <td>
+              {%- for key, value in event.attributes.items() -%}
+                {{ key }}={{ value }}{{ ' ' if not loop.last }}
+              {%- endfor -%}
+            </td>
+          </tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+
+    {% if step.detail_attributes %}
+      <h4>Attributes</h4>
+      <table class="kv">
+        {% for key, value in step.detail_attributes %}
+          <tr><td>{{ key }}</td><td>{{ value }}</td></tr>
+        {% endfor %}
+      </table>
+    {% endif %}
+  </div>
+</details>
+{% endfor %}
+
+{% if not view.steps %}
+  <p class="empty">This run recorded no model or tool calls.</p>
+{% endif %}
+{% endblock %}

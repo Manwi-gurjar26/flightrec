@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}runs - flightrec{% endblock %}
+{% block subtitle %}{{ summaries|length }} recorded run{{ '' if summaries|length == 1 else 's' }}{% endblock %}
+
+{% block content %}
+{% if not summaries %}
+  <p class="empty">
+    No runs recorded yet.<br>
+    <span class="mono">flightrec demo --seed 0 --db {{ db_path }}</span>
+  </p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Run</th>
+      <th>Status</th>
+      <th class="right">Steps</th>
+      <th class="right">Errors</th>
+      <th class="right">Tokens</th>
+      <th class="right">Duration</th>
+      <th>Recorded</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for s in summaries %}
+    <tr>
+      <td class="mono"><a href="/runs/{{ s.run_id }}">{{ s.run_id[:12] }}</a>
+          <span class="muted">{{ s.root_name or '' }}</span></td>
+      <td>
+        {% if s.status == 'error' %}<span class="pill error">error</span>
+        {% elif s.status == 'partial' %}<span class="pill warn">partial</span>
+        {% else %}<span class="pill ok">ok</span>{% endif %}
+      </td>
+      <td class="right mono">{{ s.step_count }}</td>
+      <td class="right mono">{{ s.error_count or '' }}</td>
+      <td class="right mono">{{ '{:,}'.format(s.total_tokens) }}</td>
+      <td class="right mono">{{ format_duration(s.duration_ms) }}</td>
+      <td class="mono muted">{{ format_timestamp(s.created_at) }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted" style="margin-top:22px;font-size:12px">
+  A run marked <span class="pill ok">ok</span> only means no step reported an
+  error. It does not mean the answer was right &mdash; see any run where a tool
+  returned stale data.
+</p>
+{% endif %}
+{% endblock %}

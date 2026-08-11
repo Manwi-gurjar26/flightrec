@@ -30,6 +30,9 @@ flightrec = "flightrec.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+flightrec = ["templates/*.html"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
