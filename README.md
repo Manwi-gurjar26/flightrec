@@ -1,0 +1,179 @@
+# flightrec
+
+**A flight recorder for LLM agents.** Record every step of an agent run, replay it
+deterministically from any step, and diff two runs to find exactly where they diverged.
+
+---
+
+> ### The number
+>
+> **Replay reproduces the recorded step sequence 100% of the time at temperature 0 — up from 0% before pinning tool results, timestamps and retry jitter.**
+>
+> *Status: not yet measured. This README was written before the code, deliberately.
+> Every number below is a **target with a defined measurement procedure** (see
+> [Measurement](#measurement)). Each one is replaced with a measured value, or an
+> honest worse one, when step 9 of the build lands. Nothing here is quoted on a
+> resume until it comes out of `flightrec bench`.*
+
+---
+
+## The problem
+
+Agents fail in the middle, not at the end.
+
+The seventh tool call returns an empty list. The agent doesn't crash — it invents a
+recovery that looks plausible and is wrong. Four steps later you get an answer that is
+confidently incorrect, and the only artifact you have is 4,000 lines of JSON in a
+terminal scrollback.
+
+Three things are broken about debugging that:
+
+1. **Print-statement debugging stops working past about three steps.** The state you
+   need to see is a tree, not a line.
+2. **Failures can't be reproduced.** Every run is different, so "run it again and watch"
+   is not a debugging strategy.
+3. **Nobody can answer "why did this run cost 8x more than the last one?"** — because
+   nobody is lining the two runs up against each other.
+
+`flightrec` is the readable version: a timeline of every step showing what the agent was
+reasoning about, which tool it called, what came back, what it cost, and the precise
+moment things went wrong — plus the ability to *go back to that moment and change one
+thing*.
+
+## What it does
+
+- **Trace.** A small SDK (one decorator, one context manager) wraps model calls and tool
+  calls and emits spans following the OpenTelemetry GenAI semantic conventions — a real
+  tracing format, not a private invention.
+- **Store.** A FastAPI collector writes span trees to SQLite. A run is a tree, so the
+  schema carries parent references.
+- **See.** A step timeline with expandable detail, prompt and response side by side, a
+  token/cost bar per step, and red markers on errors and retries.
+- **Replay.** Re-run from step N with every earlier step served from the recording. Change
+  one prompt and see the effect without paying for the first six steps again.
+- **Diff.** Put two runs side by side, align their steps properly, and point at the first
+  genuine divergence.
+
+## Why this was hard
+
+*(The three sections below are the point of the project. They get filled in with what
+actually happened — what was tried first, why it failed, what replaced it — as each piece
+lands. Placeholders are marked TODO and are not allowed to survive to v1.0.)*
+
+### 1. Deterministic replay: every source of variation has to be pinned
+
+A replay that isn't bit-identical isn't a replay, it's a second run wearing a costume —
+and the failure is silent, which is the worst property a debugging tool can have.
+
+The sources of non-determinism, each of which has to be independently pinned:
+
+| Source | How it leaks | Pinned by |
+|---|---|---|
+| Sampling | temperature / top_p / seed | recorded in the span, forced on replay |
+| Tool results | live call returns different data | served from the recording, never re-executed |
+| System clock | `datetime.now()` inside a prompt | virtual clock seeded from the recording |
+| Retry/backoff | jitter changes the call sequence | seeded RNG, recorded seed |
+| Iteration order | `set` / `dict` ordering across processes | `PYTHONHASHSEED` recorded and forced |
+
+TODO: which of these actually bit us, and what the fidelity number was before and after each.
+
+### 2. The forward-execution problem, which has no obvious right answer
+
+Once you edit step 3, every step after it is invalid — the recording is no longer a
+description of what this modified run would do.
+
+**Decision: re-execute forward with live calls, and mark every step after the edit point
+as `divergent` in the UI.** A `--strict` flag stops at the edit point instead of guessing.
+
+Rationale: the whole reason to edit step 3 is to see what happens *afterwards*; stopping
+there answers nothing. But a user must never be able to mistake a live-executed step for a
+recorded one, so divergence is a visible property of every step, not a footnote.
+
+TODO: revisit after using it. Note the cost implications of forward re-execution.
+
+### 3. Run diffing is sequence alignment, not `zip()`
+
+Two runs have different numbers of steps. Run A retried a tool twice; run B didn't. Pairing
+them index-by-index means every step after the first insertion is compared against the
+wrong partner, and the tool reports garbage divergence from that point on.
+
+This is a sequence alignment problem. It needs:
+
+- a **similarity function** over steps — tool name, arguments, outcome class — not string
+  equality of the whole span;
+- an **alignment algorithm** (Needleman–Wunsch, affine gap penalties) to line the two
+  sequences up before any comparison happens;
+- only then, a **first genuine divergence** to point at.
+
+TODO: the gap penalty tuning, and the cases where alignment still gets it wrong.
+
+## Architecture
+
+```
+  your agent code
+        │  @trace / with span(...)
+        ▼
+  flightrec SDK ──── spans (OTel GenAI conventions) ────┐
+        │                                               │
+        │ replay: tool results served from recording    │
+        ▼                                               ▼
+  replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
+        │                                               │
+        └──────────► diff (Needleman–Wunsch) ◄──────────┘
+                             │
+                             ▼
+                   timeline UI (Jinja2 + HTMX)
+```
+
+## Install
+
+```bash
+python -m venv .venv
+.venv/Scripts/activate        # Windows
+# source .venv/bin/activate   # macOS / Linux
+pip install -e ".[server,dev]"
+pytest
+```
+
+## Measurement
+
+Every number in this README comes from `flightrec bench`, which is committed and
+reproducible. No number is reported without a baseline to compare it against.
+
+| Metric | How it is measured | Baseline | Target |
+|---|---|---|---|
+| **Replay fidelity** | Fraction of N recorded runs whose replayed step sequence is identical to the recording, at temperature 0 | Same measurement with pinning disabled | 100% vs. ~0% |
+| **Divergence localization** | Of M runs with a synthetically injected divergence at a known step, the fraction where diff reports that exact step | Index-by-index `zip()` pairing | alignment ≫ zip |
+| **Replay cost saving** | Provider tokens spent replaying from step N vs. re-running from step 0 | Full re-run | — |
+| **Overhead** | Wall-clock and token overhead the SDK adds to an uninstrumented run | Uninstrumented agent | < 5% wall clock |
+
+The demo agent used for all measurements is committed (`examples/research_agent.py`) and
+runs against a deterministic stub model by default, so anyone can reproduce these numbers
+without an API key.
+
+## Build status
+
+- [ ] 1. Repo skeleton + README contract
+- [ ] 2. Span model + tracing SDK
+- [ ] 3. Demo agent that genuinely fails
+- [ ] 4. Collector + SQLite storage
+- [ ] 5. Timeline UI
+- [ ] 6. Token / cost rollups
+- [ ] 7. Deterministic replay
+- [ ] 8. Run diff with sequence alignment
+- [ ] 9. Measurement harness → real numbers in this README
+
+## What I would do with two more weeks
+
+- **Flaky-step report.** Run the same task 50 times, cluster the trajectories, and rank
+  steps by outcome variance. The high-variance steps are the ones the prompt is handling
+  by luck.
+- **Score the replay, not just reproduce it.** Attach a rubric-based scorer to each
+  replayed run so "I changed step 3's prompt" produces a quality delta, not just a
+  different transcript.
+- **Trajectory-level regression gate in CI.** Block a PR when the agent's step sequence on
+  a fixed task set changes in a way that costs more or scores worse.
+
+## Licence
+
+MIT.
