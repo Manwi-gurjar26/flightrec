@@ -26,7 +26,7 @@ from typing import Iterator
 
 from pydantic import BaseModel
 
-from flightrec.spans import Run, Span, SpanKind, SpanStatus
+from flightrec.spans import FR_REPLAYED, Run, Span, SpanKind, SpanStatus
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -69,6 +69,12 @@ class RunSummary(BaseModel):
     total_cost_usd: float = 0.0
     duration_ms: float | None = None
     complete: bool = False
+    is_replay: bool = False
+    """Marked in the list as well as on the page.
+
+    Finding out that a run was a replay only after opening it is finding out too
+    late -- the run list is where somebody picks which run to trust.
+    """
 
     @property
     def status(self) -> str:
@@ -238,4 +244,5 @@ def _summarise(run: Run, created_at: float) -> RunSummary:
         total_cost_usd=run.total_cost_usd,
         duration_ms=duration,
         complete=complete,
+        is_replay=any(s.attr(FR_REPLAYED) for s in run.spans),
     )

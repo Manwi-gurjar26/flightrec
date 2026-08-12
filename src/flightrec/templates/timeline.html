@@ -96,6 +96,16 @@
 </p>
 {% endif %}
 
+{% if view.is_replay %}
+<p class="notice" style="margin-bottom:16px">
+  <strong>This is a replay, not a recording.</strong>
+  {{ view.recorded_count }} step{{ '' if view.recorded_count == 1 else 's' }} served from
+  the original and {{ view.live_count }} executed live. Steps are labelled
+  individually &mdash; a live step is a real call that happened just now, and its
+  result is not evidence about the run being replayed.
+</p>
+{% endif %}
+
 {% for step in view.steps %}
 <details class="step {{ 'err' if step.is_error }}">
   <summary>
@@ -106,6 +116,12 @@
       <span class="sum">{{ step.summary[:90] }}{{ '...' if step.summary|length > 90 }}</span>
     </span>
     <span class="smeta">
+      {# Provenance goes on every step of a replay, never in a footnote. A
+         live-executed step that looks like a recorded one is the confusion this
+         whole tool exists to prevent. #}
+      {% if step.provenance == 'live' %}<span class="pill warn" title="executed live: past the edit point, the recording no longer applies">live</span>
+      {% elif step.provenance == 'recorded' %}<span class="pill ok" title="served from the recording; this step was not executed">recorded</span>
+      {% elif step.provenance == 'stopped' %}<span class="pill error" title="--strict stopped the replay here rather than guess">stopped</span>{% endif %}
       {% if step.confabulated %}<span class="pill warn" title="this step invented data instead of using a tool result">invented</span>{% endif %}
       {% if step.retry_count %}<span class="pill warn">{{ step.retry_count }} retry</span>{% endif %}
       {% if step.is_error %}<span class="pill error">error</span>{% endif %}

@@ -179,6 +179,54 @@ def test_timeline_page_marks_errors(client, store):
     assert 'class="pill error"' in response.text
 
 
+def test_a_replay_cannot_be_mistaken_for_a_recording(client, store):
+    """The rule the CLI has enforced since replay landed, now on the page people read.
+
+    A replayed run rendered exactly like an original one: same steps, same
+    everything, no indication that half of them were re-executed live minutes
+    ago. That is the confusion this project exists to prevent, sitting in the
+    one view a human actually looks at.
+    """
+    from flightrec.replay import replay_run
+
+    original = make_run(seed=1)
+    replay = replay_run(original, from_step=4).run
+    store.add_run(original)
+    store.add_run(replay)
+
+    recorded_page = client.get(f"/runs/{original.run_id}").text
+    replay_page = client.get(f"/runs/{replay.run_id}").text
+
+    assert "This is a replay, not a recording" in replay_page
+    assert ">live<" in replay_page
+    assert ">recorded<" in replay_page
+
+    assert "This is a replay" not in recorded_page
+    assert ">live<" not in recorded_page
+
+
+def test_a_replayed_step_says_which_kind_it_is(store):
+    """Per step, not just a banner: the banner is a footnote once you scroll."""
+    from flightrec.replay import replay_run
+    from flightrec.web import build_timeline
+
+    view = build_timeline(replay_run(make_run(seed=1), from_step=4).run)
+
+    assert view.is_replay
+    assert view.recorded_count and view.live_count
+    assert all(step.provenance in ("recorded", "live", "stopped") for step in view.steps)
+
+
+def test_an_ordinary_run_carries_no_provenance_noise(store):
+    """A recording is not a replay of anything, and must not imply it is."""
+    from flightrec.web import build_timeline
+
+    view = build_timeline(make_run(seed=1))
+
+    assert not view.is_replay
+    assert not any(step.provenance for step in view.steps)
+
+
 def test_timeline_page_for_a_missing_run_is_404(client):
     assert client.get("/runs/nope").status_code == 404
 

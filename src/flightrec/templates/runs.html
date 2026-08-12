@@ -31,6 +31,8 @@
         {% if s.status == 'error' %}<span class="pill error">error</span>
         {% elif s.status == 'partial' %}<span class="pill warn">partial</span>
         {% else %}<span class="pill ok">ok</span>{% endif %}
+        {# Before you click, not after: the list is where a run gets trusted. #}
+        {% if s.is_replay %}<span class="pill warn" title="a replay, not a recording of a real run">replay</span>{% endif %}
       </td>
       <td class="right mono">{{ s.step_count }}</td>
       <td class="right mono">{{ s.error_count or '' }}</td>

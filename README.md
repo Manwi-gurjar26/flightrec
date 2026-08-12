@@ -11,7 +11,7 @@ deterministically from any step, and diff two runs to find exactly where they di
 > the same task without the recording reproduces it in 8 of 40.**
 >
 > *Status: measured. `flightrec bench` produces this and every other number
-> below, in about a minute, with no API key and no network.*
+> below, in about five seconds, with no API key and no network.*
 >
 > *This README was written before the code, deliberately, with each number as a
 > target and a defined measurement procedure. Two targets were met — the second
@@ -53,11 +53,13 @@ thing*.
 - **Store.** A FastAPI collector writes span trees to SQLite. A run is a tree, so the
   schema carries parent references.
 - **See.** A step timeline with expandable detail, prompt and response side by side, a
-  token/cost bar per step, and red markers on errors and retries.
+  token/cost bar per step, red markers on errors and retries, and — on a replay —
+  a label on every step saying whether it came out of the recording or was really
+  executed just now.
 - **Replay.** Re-run from step N with every earlier step served from the recording. Change
   one prompt and see the effect without paying for the first six steps again.
 - **Diff.** Put two runs side by side, align their steps properly, and point at the first
-  genuine divergence.
+  genuine divergence. Command line only: `flightrec diff`.
 
 ```bash
 flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
@@ -180,6 +182,15 @@ and the timeline shows which is which:
 | `recorded` | read back out of the recording, and billed nothing |
 | `live` | past the edit point; really executed, because the recording no longer applies |
 | `stopped` | where `--strict` gave up rather than guess — not a step that ran |
+
+**And the timeline said none of it for four build steps.** The CLI labelled every
+step from the day replay landed; the web UI, which is the view a person actually
+reads, rendered a replay identically to a recording — same steps, no indication
+that half of them were re-executed minutes ago. The rule at the top of this
+section was being enforced in the interface nobody was looking at. Every step of
+a replay now carries its label in the timeline, the page opens with a banner
+saying it is not a recording, and the run list marks replays before you click
+into one, because the list is where a run gets trusted.
 
 **What the cost measurement then found, which changed the design.** The first
 implementation served tool results from the recording and re-executed every
@@ -497,15 +508,24 @@ labelling.
         ▼
   flightrec SDK ──── spans (OTel GenAI conventions) ────┐
         │                                               │
-        │ replay: tool results served from recording    │
+        │ replay: earlier steps served from recording   │
         ▼                                               ▼
   replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
         │                                               │
-        └────► diff (Needleman–Wunsch + moves) ◄────────┘
-                             │
-                             ▼
-                   timeline UI (Jinja2 + HTMX)
+        │                                               ▼
+        │                                    timeline UI (Jinja2, no JS)
+        │                                    · marks replayed vs live steps
+        ▼
+  diff (Needleman–Wunsch + move recovery)  ──►  CLI only, for now
 ```
+
+Two things that diagram gets right by having been corrected: the UI is plain
+Jinja2 with **no JavaScript**, not "Jinja2 + HTMX" as it claimed for six build
+steps — HTMX appears nowhere in the codebase and would have contradicted the
+no-JavaScript rule two paragraphs above. And the diff feeds the CLI, not the
+timeline: `flightrec diff` is the only way to see one. A diagram describing
+software that does not exist is the same failure as a number without a
+measurement.
 
 ## Install
 
@@ -524,7 +544,7 @@ reproducible. No number is reported without a baseline to compare it against, an
 none is reported without its limits.
 
 ```bash
-flightrec bench                 # ~1 minute, 40 runs per metric
+flightrec bench                 # ~5 seconds, 40 runs per metric
 flightrec bench --json          # machine-readable
 ```
 

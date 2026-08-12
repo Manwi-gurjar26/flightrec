@@ -10,7 +10,7 @@ itself. So the RNG is injected, never global.
 from __future__ import annotations
 
 import random
-from typing import Any, Callable, TypeVar
+from typing import Callable, TypeVar
 
 from flightrec.spans import Span, SpanEvent
 
@@ -68,7 +68,3 @@ def retry_call(
 def make_rng(seed: int) -> random.Random:
     """The only sanctioned way to get randomness in this project."""
     return random.Random(seed)
-
-
-def _unused(*_: Any) -> None:  # pragma: no cover
-    pass

@@ -11,8 +11,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from flightrec.spans import (
+    FR_DIVERGENT,
     FR_INPUT,
     FR_OUTPUT,
+    FR_REPLAYED,
+    FR_SERVED,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_TOOL_NAME,
@@ -25,7 +28,7 @@ from flightrec.spans import (
 
 #: Attributes rendered in dedicated places, so they are not repeated in the
 #: raw attribute table.
-_PROMOTED = {FR_INPUT, FR_OUTPUT}
+_PROMOTED = {FR_INPUT, FR_OUTPUT, FR_REPLAYED, FR_SERVED, FR_DIVERGENT}
 
 
 @dataclass
@@ -51,6 +54,15 @@ class StepView:
     events: list[SpanEvent] = field(default_factory=list)
     retry_count: int = 0
     confabulated: bool = False
+    provenance: str = ""
+    """Where this step came from: ``recorded``, ``live``, or empty for an original run.
+
+    Rendered on every step of a replay, never as a footnote. A replayed run that
+    looked like an ordinary recording was the exact confusion this project is
+    built to prevent -- the CLI has labelled provenance since replay landed and
+    the timeline did not, which made the one view a person actually reads the
+    one that could mislead them.
+    """
 
     @property
     def has_detail(self) -> bool:
@@ -79,6 +91,18 @@ class TimelineView:
         if not self.complete:
             return "partial"
         return "error" if self.error_count else "ok"
+
+    @property
+    def is_replay(self) -> bool:
+        return any(step.provenance for step in self.steps)
+
+    @property
+    def live_count(self) -> int:
+        return sum(1 for step in self.steps if step.provenance == "live")
+
+    @property
+    def recorded_count(self) -> int:
+        return sum(1 for step in self.steps if step.provenance == "recorded")
 
 
 _KIND_LABELS = {
@@ -153,7 +177,19 @@ def _build_step(span: Span, max_duration: float, max_tokens: int) -> StepView:
         events=list(span.events),
         retry_count=sum(1 for e in span.events if e.name == "retry"),
         confabulated=bool(span.attr("flightrec.confabulated")),
+        provenance=_provenance(span),
     )
+
+
+def _provenance(span: Span) -> str:
+    """Where a step came from, for a replayed run. Empty for an original one."""
+    if not span.attr(FR_REPLAYED):
+        return ""
+    if span.attr(FR_SERVED):
+        return "recorded"
+    if "ReplayStopped" in (span.status_message or ""):
+        return "stopped"
+    return "live"
 
 
 def _summarise(span: Span) -> str:
