@@ -403,6 +403,44 @@ def test_a_reworded_query_that_changed_the_result_is_a_divergence() -> None:
     assert diff.divergence_index == 1
 
 
+def test_two_different_failures_are_not_the_same_result() -> None:
+    """A failed step records an output of ``None``, which makes every failure
+    look alike unless the message is compared.
+
+    Two fetches of two *different* URLs that both 404 were being reported as one
+    step with reworded arguments -- a genuine difference described as cosmetic,
+    on exactly the steps where a run went wrong. It also hid them from the move
+    pass, which treats a cosmetic column as settled and never looks again.
+    """
+    left = make_run(CLEAN)
+    right = make_run(CLEAN, run_id="b")
+    for run, url in ((left, "seattle-climate"), (right, "portland-annual")):
+        step = run.steps()[3]
+        step.attributes[FR_INPUT] = {"url": f"https://w.example/{url}"}
+        step.attributes[FR_OUTPUT] = None
+        step.status = SpanStatus.ERROR
+        step.status_message = f"ToolError: 404: no such page https://w.example/{url}"
+
+    diff = diff_runs(left, right)
+
+    assert diff.count(Op.COSMETIC) == 0
+    assert diff.divergence_index == 3
+
+
+def test_the_same_failure_twice_is_still_a_match() -> None:
+    """The other half: identical failures must not become spurious divergences."""
+    runs = []
+    for label in ("a", "b"):
+        run = make_run(CLEAN, run_id=label)
+        step = run.steps()[3]
+        step.attributes[FR_OUTPUT] = None
+        step.status = SpanStatus.ERROR
+        step.status_message = "ToolError: 404: no such page"
+        runs.append(run)
+
+    assert diff_runs(*runs).identical
+
+
 def test_the_same_tool_failing_instead_of_succeeding_is_a_divergence() -> None:
     left = make_run(CLEAN)
     failed = list(CLEAN)

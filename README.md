@@ -319,18 +319,39 @@ by thinking:
 | insertions fell 100% → 97.5% | a correctly-paired changed step was treated as "weak" and thrown back into the pool, where an exact-match candidate took its counterpart. Confident changed pairs are now protected. |
 | reorderings stuck at 97.5% | protection used the same 0.9 threshold as matching, so a step paired with its *positional* neighbour at 0.955 was protected and never re-examined. Two decisions, two constants: protection now requires total certainty. |
 
-Localization is 100% on all six classes, and pairing accuracy is 99.4% or better.
 `identical` also had to learn about order — every column of a pure reordering is a
 `MATCH`, so a diff that only checked content reported two runs that did the same
 things in a different sequence as the same run.
+
+### The last 0.6%, which was not an alignment problem at all
+
+That left pairing accuracy at 99.4% on insertion-plus-deletion and 99.7% on
+reorderings — two mutants out of forty, and the temptation was to tune something.
+The cause was in neither pass.
+
+**A failed step records an output of `None`, so every failure looked alike.**
+`_classify` compared the tool name, the output and the status, and concluded that
+two fetches of two *different* URLs that both 404'd were the same step with
+reworded arguments — `cosmetic`. It never compared the error message. So the
+diff was quietly telling users that a run which failed to fetch
+`seattle-climate` and a run which failed to fetch `portland-annual` differed only
+in phrasing, **on precisely the steps where those runs went wrong**.
+
+The pairing damage was a side effect: a column called cosmetic is treated as
+settled, so the move pass never re-examined it, and a step that had an exact
+match waiting three positions away stayed paired with a stranger. Comparing the
+message fixed both numbers at once — localization and pairing are now 100% on all
+six classes — but the classification bug was the more serious half, and it would
+have survived any amount of work on the aligner.
+
+`step_signature` had the same hole and got the same fix, so `MATCH` cannot claim
+two steps are identical when they failed for different reasons.
 
 **What is still not solved.** Which *side* of a swap is "the one that moved" is
 genuinely ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier"
 describe one event, the two backbones are the same length, and the tie-break is
 arbitrary. The tests assert the pairing, which is not ambiguous, and explicitly
-allow either labelling. Pairing accuracy also stops at 99.4% on
-insertion-plus-deletion; those are cases where the first pass finds a positional
-chain the second pass has no confident reason to overturn.
+allow either labelling.
 
 ## Architecture
 

@@ -265,6 +265,10 @@ def step_signature(span: Span) -> tuple[str, ...]:
     recording's UUIDs or its wall clock, and two runs of the same agent never
     share them. Everything describing *what happened* is included, so a step
     that produced different output can never pass as the same step.
+
+    That includes the failure message. A failed step records an output of
+    ``None``, so without it every failure looks alike, and two steps that failed
+    for entirely different reasons compare as identical.
     """
     return (
         span.kind.value,
@@ -272,6 +276,7 @@ def step_signature(span: Span) -> tuple[str, ...]:
         stable_key(span.attr(FR_INPUT)),
         stable_key(span.attr(FR_OUTPUT)),
         span.status.value,
+        span.status_message or "",
     )
 
 

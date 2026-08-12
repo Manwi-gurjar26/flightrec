@@ -533,12 +533,27 @@ def _rebuild(
 def _classify(left: Span, right: Span) -> Op:
     if step_signature(left) == step_signature(right):
         return Op.MATCH
-    same_outcome = left.status is right.status and stable_key(
-        left.attr(FR_OUTPUT)
-    ) == stable_key(right.attr(FR_OUTPUT))
-    if _label(left) == _label(right) and same_outcome:
+    if _label(left) == _label(right) and _same_outcome(left, right):
         return Op.COSMETIC
     return Op.CHANGED
+
+
+def _same_outcome(left: Span, right: Span) -> bool:
+    """Did two steps really produce the same thing?
+
+    The error message counts, and leaving it out was a bug with teeth. A failed
+    tool call records an output of ``None``, so *every* pair of failures looked
+    like "same result" -- and two fetches of two different URLs that both 404
+    were reported as one step with reworded arguments. That is a genuine
+    difference described as a cosmetic one, on exactly the steps where a run
+    went wrong, and it also hid the step from the move pass: a column called
+    cosmetic is treated as settled and never re-examined.
+    """
+    return (
+        left.status is right.status
+        and left.status_message == right.status_message
+        and stable_key(left.attr(FR_OUTPUT)) == stable_key(right.attr(FR_OUTPUT))
+    )
 
 
 # --- the two pairings ---------------------------------------------------------
