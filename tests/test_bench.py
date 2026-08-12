@@ -56,31 +56,49 @@ def test_the_mutation_classes_are_not_all_easy() -> None:
     """A benchmark every arm passes is a benchmark that is not measuring.
 
     Two classes are here specifically because index pairing handles them fine --
-    they keep the comparison honest. At least one has to defeat the alignment,
-    or the generator is still too gentle to have found anything.
+    they keep the comparison honest by showing the baseline is capable of
+    winning where alignment buys nothing.
     """
     results = {r.kind: r for r in localization_by_kind(SEEDS)}
 
     assert results["double-change"].rate(results["double-change"].naive) == 100.0
-    assert results["reorder"].rate(results["reorder"].aligned) < 100.0
+    assert results["insert"].rate(results["insert"].naive) == 0.0
 
 
-def test_reordering_defeats_the_alignment_because_it_is_monotonic() -> None:
-    """The known structural limit, pinned so it cannot be silently "fixed".
+def test_reordering_defeats_the_monotonic_pass_on_its_own() -> None:
+    """The structural limit that the move pass exists to answer.
 
     Needleman-Wunsch produces a monotonic correspondence: step order is
     preserved on both sides. A reordering is by definition non-monotonic, so no
-    amount of penalty tuning represents one -- it comes out as a gap in one
-    place and a gap in the other. If this test starts failing, either the
-    aligner is no longer monotonic or the mutation stopped reordering anything.
+    amount of penalty tuning represents one -- which is why the fix is a second
+    pass rather than a better score function. This pins the *reason*: turn move
+    recovery off and the failure comes straight back.
     """
-    reorder = next(r for r in localization_by_kind(SEEDS) if r.kind == "reorder")
+    monotonic = next(
+        r for r in localization_by_kind(SEEDS, detect_moves=False) if r.kind == "reorder"
+    )
 
-    assert reorder.total > 0
-    assert reorder.rate(reorder.aligned) < 100.0
-    assert reorder.aligned_pairing < 100.0
-    # Still better than index pairing, which handles it no better and shifts too.
-    assert reorder.rate(reorder.aligned) > reorder.rate(reorder.naive)
+    assert monotonic.total > 0
+    assert monotonic.rate(monotonic.aligned) < 100.0
+    assert monotonic.aligned_pairing < 100.0
+
+
+def test_move_recovery_fixes_reordering_without_costing_the_other_classes() -> None:
+    """The second pass has to earn its place on every class, not just its own.
+
+    A pass that re-pairs steps after the fact can just as easily invent
+    correspondences that were not there -- the first version of it did exactly
+    that, dropping deletions from 100% to 70% by letting a deleted step claim
+    the changed step's partner.
+    """
+    monotonic = {r.kind: r for r in localization_by_kind(SEEDS, detect_moves=False)}
+    recovered = {r.kind: r for r in localization_by_kind(SEEDS)}
+
+    assert recovered["reorder"].rate(recovered["reorder"].aligned) == 100.0
+    for kind, result in recovered.items():
+        before = monotonic[kind]
+        assert result.rate(result.aligned) >= before.rate(before.aligned), kind
+        assert result.aligned_pairing >= before.aligned_pairing - 1e-9, kind
 
 
 def test_replay_saves_tokens_against_re_running() -> None:

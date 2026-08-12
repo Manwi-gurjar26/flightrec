@@ -336,7 +336,10 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     print(f"{'':6} {'':2} {'LEFT':<22} {'RIGHT':<22}")
 
     for column in diff.columns:
-        mark = _DIFF_MARKS[column.op.value]
+        # A move is orthogonal to the content class, so it gets its own marker
+        # rather than a sixth op: a step can be reordered *and* changed, and
+        # showing only one of those would hide half of what happened.
+        mark = ">" if column.moved else _DIFF_MARKS[column.op.value]
         index = column.index
         left_name = column.left.name if column.left else ""
         right_name = column.right.name if column.right else ""
@@ -348,13 +351,17 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             )
         elif column.op is Op.COSMETIC:
             detail = "reworded, same result"
+        if column.moved:
+            detail = f"moved to step {column.right_index}" + (
+                f"; {detail}" if detail else ""
+            )
         print(f" [{index:>2}]  {mark}  {left_name:<22} {right_name:<22} {detail}")
 
     counts = diff.counts
     print(
         f"\n{counts[Op.MATCH]} identical, {counts[Op.COSMETIC]} cosmetic, "
         f"{counts[Op.CHANGED]} changed, {counts[Op.REMOVED]} only in left, "
-        f"{counts[Op.INSERTED]} only in right"
+        f"{counts[Op.INSERTED]} only in right, {diff.moved_count} reordered"
     )
 
     divergence = diff.first_divergence
@@ -365,10 +372,15 @@ def _cmd_diff(args: argparse.Namespace) -> int:
             else "the two runs are identical"
         )
     else:
-        print(
-            f"first genuine divergence: step {divergence.index} "
-            f"({divergence.op.value}, {divergence.left.name if divergence.left else divergence.right.name})"
-        )
+        step = divergence.left or divergence.right
+        # A moved step's op is usually MATCH -- its content is identical, it just
+        # happened elsewhere. Printing "match" as the reason for a divergence
+        # reads as a contradiction, so the move is named instead.
+        if divergence.moved:
+            kind = "reordered and changed" if divergence.op is Op.CHANGED else "reordered"
+        else:
+            kind = divergence.op.value
+        print(f"first genuine divergence: step {divergence.index} ({kind}, {step.name})")
     return 0
 
 

@@ -14,10 +14,10 @@ deterministically from any step, and diff two runs to find exactly where they di
 > below, in about a minute, with no API key and no network.*
 >
 > *This README was written before the code, deliberately, with each number as a
-> target and a defined measurement procedure. One target was met outright, one
-> was met with two documented failures the benchmark had to be made harsher to
-> find, one had no target, and one was missed by a factor of about twenty — see
-> [Measurement](#measurement), where the misses are written up rather than
+> target and a defined measurement procedure. Two targets were met — the second
+> only after the benchmark was made harsh enough to break the thing it was
+> measuring — one had no target, and one was missed by a factor of about twenty.
+> See [Measurement](#measurement), where the miss is written up rather than
 > quietly dropped.*
 
 ---
@@ -207,6 +207,8 @@ This is a sequence alignment problem. It needs:
   equality of the whole span;
 - an **alignment algorithm** (Needleman–Wunsch, affine gap penalties) to line the two
   sequences up before any comparison happens;
+- a **second pass to recover reorderings**, because the alignment above is
+  monotonic and a reordering is not — see [below](#where-the-alignment-gets-it-wrong);
 - only then, a **first genuine divergence** to point at.
 
 **The gap-open penalty is a tie-breaker, not a force, and tuning it as a force
@@ -263,35 +265,72 @@ deletion, insertion *and* deletion, two changes at once, reordering, and one
 tool substituted for another — and they are scored separately, because an
 average over classes hides a total failure behind five easy passes.
 
-Two of them break it.
+Two of them broke it. Both are fixed; what follows is what they were, because
+the second fix is the more interesting half of this section.
 
-**1. Reordering, which no amount of tuning will fix.** Needleman–Wunsch produces
+**1. Reordering, which no amount of tuning would fix.** Needleman–Wunsch produces
 a *monotonic* correspondence: step order is preserved on both sides. A
-reordering is by definition non-monotonic, so it cannot be represented at all —
-it comes out as a gap in one place and a gap in the other, and the two halves of
-the moved block are never paired with each other. Localization drops to 72%, and
-every one of the failures involves a step whose correspondence crosses another's;
-the cases that pass are the ones where the changed step happened to sit outside
-the moved region. Fixing this properly means abandoning a global alignment for
-something that can express a transposition. It is not a penalty-tuning problem
-and is not written up here as one.
+reordering is by definition non-monotonic, so it could not be represented at all.
+Localization dropped to 72%, and every failure involved a step whose
+correspondence crossed another's. This was never a penalty-tuning problem —
+run `flightrec bench` against the first pass alone and the failure comes
+straight back, which a test pins.
 
-**2. An insertion and a deletion that cancel out in length, which is the more
+**2. An insertion and a deletion that cancel out in length, which was the more
 embarrassing one.** Two steps added and two removed leaves the run the same
 length. The aligner then discovers that pairing every step positionally costs a
 handful of substitutions, while representing the truth costs two gap blocks at
-−1.45 each — so it takes the cheap option and **degenerates into exactly the
+−1.45 each — so it took the cheap option and **degenerated into exactly the
 index-by-index pairing this whole module exists to beat**. On the failing cases
-the diff contains no gaps at all: five matches, six changes, every step paired
+the diff contained no gaps at all: five matches, six changes, every step paired
 with its positional neighbour.
 
-The second one is worth dwelling on, because localization still scores 100% for
-that class. The changed step is chosen after the deletion, where the net offset
-is back to zero, so the headline metric is satisfied by an alignment that is
+The second one is worth dwelling on, because localization scored 100% for that
+class throughout. The changed step sits after the deletion, where the net offset
+is back to zero, so the headline metric was satisfied by an alignment that was
 wrong about nine steps out of eleven. That is why the benchmark reports a second,
 harsher number — the fraction of *all* surviving steps paired with their true
-counterpart — alongside it. Localization says 100%; pairing says 91.9%, and the
-gap between those two numbers is the part that would have shipped unnoticed.
+counterpart. Localization said 100%; pairing said 91.9%, and the gap between
+those two numbers is what would have shipped unnoticed.
+
+### The fix: a second pass, not a better score function
+
+Move recovery runs after the alignment and only touches pairings the first pass
+was not confident about. Gaps and weak substitutions go back into a pool and get
+re-matched, best candidate first: identical steps first, needing no threshold,
+then whatever is left by similarity above 0.9 — which is what catches a step that
+was moved *and* edited, since its content differs and only a function that
+ignores output can still recognise it. Whatever pairs remain out of order
+relative to the longest consistent backbone are the ones that moved.
+
+It could not just examine gap blocks the way a line differ does. A reordering
+preserves length, so in the common case the first pass emits **no gaps at all** —
+it pairs everything positionally through a chain of substitutions, the same
+degeneracy as failure 2. Half the reorder cases came out as `rem rem … ins ins`
+and half as six substitutions and nothing else, and a fix that only understood
+the first shape would have looked like it worked.
+
+Three bugs in the pass itself, all found by re-running the benchmark rather than
+by thinking:
+
+| Symptom | Cause |
+|---|---|
+| deletions fell 100% → 70% | the pass walked left steps in order, so a *deleted* step reached the changed step's counterpart first and paired with it — losing the deletion and the edit together. Now every candidate is scored and the strongest pair is taken first. |
+| insertions fell 100% → 97.5% | a correctly-paired changed step was treated as "weak" and thrown back into the pool, where an exact-match candidate took its counterpart. Confident changed pairs are now protected. |
+| reorderings stuck at 97.5% | protection used the same 0.9 threshold as matching, so a step paired with its *positional* neighbour at 0.955 was protected and never re-examined. Two decisions, two constants: protection now requires total certainty. |
+
+Localization is 100% on all six classes, and pairing accuracy is 99.4% or better.
+`identical` also had to learn about order — every column of a pure reordering is a
+`MATCH`, so a diff that only checked content reported two runs that did the same
+things in a different sequence as the same run.
+
+**What is still not solved.** Which *side* of a swap is "the one that moved" is
+genuinely ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier"
+describe one event, the two backbones are the same length, and the tie-break is
+arbitrary. The tests assert the pairing, which is not ambiguous, and explicitly
+allow either labelling. Pairing accuracy also stops at 99.4% on
+insertion-plus-deletion; those are cases where the first pass finds a positional
+chain the second pass has no confident reason to overturn.
 
 ## Architecture
 
@@ -305,7 +344,7 @@ gap between those two numbers is the part that would have shipped unnoticed.
         ▼                                               ▼
   replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
         │                                               │
-        └──────────► diff (Needleman–Wunsch) ◄──────────┘
+        └────► diff (Needleman–Wunsch + moves) ◄────────┘
                              │
                              ▼
                    timeline UI (Jinja2 + HTMX)
@@ -335,7 +374,7 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **95%** over 6 mutation classes — 100% for insertions and deletions, 72% for reorderings | 55% — index-by-index `zip()` pairing | alignment ≫ zip | met, with two known failures |
+| **Divergence localization** | **100%** over 6 mutation classes (238/238) | 55% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -346,14 +385,18 @@ percent between runs and considerably more between machines; it is quoted with a
 
 Five things these numbers do not say, in descending order of how much they matter:
 
-**The 55% baseline is not a fair fight in either direction, and neither is the
-95%.** Three of the six mutation classes change no lengths at all, and on those
-index pairing is *correct* — it scores 100%, which drags the baseline up from the
-0% it scores on insertions and deletions. Conversely the alignment's 95% is
-dragged down by reorderings, which it cannot represent in principle. The per-class
-lines in `flightrec bench` are the honest view; the single number exists because
-the table asked for one. [Where the alignment gets it
-wrong](#where-the-alignment-gets-it-wrong) has the two failures in full.
+**The 55% baseline is not a fair fight.** Three of the six mutation classes
+change no lengths at all, and on those index pairing is *correct* — it scores
+100%, which drags the baseline up from the 0% it scores on insertions and
+deletions. Read the per-class lines in `flightrec bench`, not the average; the
+single number exists because the table asked for one.
+
+**The 100% is a second attempt, and the first one was 95%.** Two mutation classes
+broke the aligner when the generator was made adversarial enough to produce them,
+and the fix — a move-recovery pass — introduced three further bugs of its own
+before it settled, one of which made deletions *worse* than no fix at all.
+[Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong) has all
+of it, including the part that is still ambiguous.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

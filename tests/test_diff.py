@@ -268,6 +268,105 @@ def test_alignment_handles_an_empty_run() -> None:
     assert diff.count(Op.REMOVED) == len(CLEAN)
 
 
+# --- reorderings, which the monotonic pass cannot express ---------------------
+
+
+def moved_run(order: list[int], run_id: str = "b") -> Run:
+    return make_run([CLEAN[i] for i in order], run_id=run_id)
+
+
+def test_a_reordered_block_is_paired_with_itself_and_marked_moved() -> None:
+    """Steps 1-2 done later. Both runs contain them; only the order differs.
+
+    Which *side* of a swap gets labelled "moved" is genuinely ambiguous -- "1-2
+    happened later" and "3-4 happened earlier" describe one event, and the two
+    backbones are the same length, so the tie-break is arbitrary and the test
+    does not pretend otherwise. What is not ambiguous, and is what the diff is
+    for, is that every step is paired with itself and nothing is reported as
+    inserted, removed or changed.
+    """
+    left = make_run(CLEAN)
+    right = moved_run([0, 3, 4, 1, 2, 5, 6])
+
+    diff = diff_runs(left, right)
+    pairs = {c.left_index: c.right_index for c in diff.columns}
+
+    assert pairs == {0: 0, 1: 3, 2: 4, 3: 1, 4: 2, 5: 5, 6: 6}
+    assert diff.count(Op.REMOVED) == 0
+    assert diff.count(Op.INSERTED) == 0
+    assert diff.count(Op.CHANGED) == 0
+    assert {c.left_index for c in diff.columns if c.moved} in ({1, 2}, {3, 4})
+
+
+def test_the_monotonic_pass_alone_cannot_do_it() -> None:
+    """The control. Without the second pass the same input comes out as gaps or
+    substitutions, which is the structural limit the second pass exists for."""
+    left = make_run(CLEAN)
+    right = moved_run([0, 3, 4, 1, 2, 5, 6])
+
+    columns = align(left.steps(), right.steps(), detect_moves=False)
+
+    assert not any(c.moved for c in columns)
+    assert {c.left_index: c.right_index for c in columns} != {1: 3, 2: 4, 0: 0}
+    assert any(c.op is not Op.MATCH for c in columns)
+
+
+def test_a_move_is_a_genuine_divergence() -> None:
+    """Doing the same steps in a different order is a real difference.
+
+    It is reported even though every step matched, because "same steps, other
+    order" is exactly the kind of thing that changes an outcome.
+    """
+    diff = diff_runs(make_run(CLEAN), moved_run([0, 3, 4, 1, 2, 5, 6]))
+
+    assert not diff.identical
+    assert diff.first_divergence is not None
+    assert diff.first_divergence.moved
+
+
+def test_a_step_that_moved_and_changed_is_reported_as_both() -> None:
+    """The case pass one cannot see: its content differs, so it is not identical
+    to anything, and only the similarity pass can recover it."""
+    left = make_run(CLEAN)
+    reordered = [CLEAN[i] for i in [0, 3, 4, 1, 2, 5, 6]]
+    reordered[3] = ("web_search", {"query": "seattle rainy days 2024"}, ["other-url"])
+    right = make_run(reordered, run_id="b")
+
+    diff = diff_runs(left, right)
+    column = next(c for c in diff.columns if c.left_index == 1)
+
+    assert column.op is Op.CHANGED
+    assert column.right_index == 3, "the similarity pass has to find it despite the edit"
+    assert diff.moved_count, "and the reordering still has to be reported"
+
+
+def test_move_recovery_does_not_invent_moves_in_an_ordinary_insertion() -> None:
+    """A pass that re-pairs after the fact can invent correspondences.
+
+    An insertion has no move in it, so nothing here may be marked as one --
+    otherwise every retry would be reported as a reordering.
+    """
+    left = make_run(CLEAN)
+    right = make_run(CLEAN[:3] + RETRY_BLOCK + CLEAN[3:], run_id="b")
+
+    diff = diff_runs(left, right)
+
+    assert not any(c.moved for c in diff.columns)
+    assert diff.count(Op.INSERTED) == 2
+
+
+def test_move_recovery_leaves_a_deletion_alone() -> None:
+    """A removed step has no counterpart, and pairing it with a survivor to
+    avoid an unexplained gap loses both the deletion and whatever it stole."""
+    left = make_run(CLEAN)
+    right = make_run(CLEAN[:1] + CLEAN[3:], run_id="b")
+
+    diff = diff_runs(left, right)
+
+    assert diff.count(Op.REMOVED) == 2
+    assert not any(c.moved for c in diff.columns)
+
+
 # --- cosmetic vs. genuine -----------------------------------------------------
 
 

@@ -156,7 +156,9 @@ class KindResult:
         )
 
 
-def localization_by_kind(seeds: range) -> list[KindResult]:
+def localization_by_kind(
+    seeds: range, detect_moves: bool = True
+) -> list[KindResult]:
     """Score both pairings against every class of mutation, separately.
 
     Separately, because an average over mutation classes is a number that can
@@ -178,7 +180,9 @@ def localization_by_kind(seeds: range) -> list[KindResult]:
             if mutation is None:
                 continue
             result.total += 1
-            aligned = diff_runs(mutation.original, mutation.mutant)
+            aligned = diff_runs(
+                mutation.original, mutation.mutant, detect_moves=detect_moves
+            )
             naive = diff_runs_by_index(mutation.original, mutation.mutant)
 
             result.aligned += int(mutation.localized_by(aligned))
@@ -220,8 +224,12 @@ def measure_divergence_localization(seeds: range) -> Measurement:
         baseline_label="index-by-index zip() pairing",
         detail=(
             f"{aligned}/{total} mutants across {len(results)} mutation classes had "
-            f"every changed step paired with its counterpart; "
-            f"worst class is {worst.kind} at {worst.rate(worst.aligned):.1f}%"
+            f"every changed step paired with its counterpart"
+            + (
+                ""
+                if worst.rate(worst.aligned) >= 100.0
+                else f"; worst class is {worst.kind} at {worst.rate(worst.aligned):.1f}%"
+            )
         ),
         breakdown=[r.line() for r in results],
         caveat=(
