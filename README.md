@@ -298,11 +298,14 @@ those two numbers is what would have shipped unnoticed.
 
 Move recovery runs after the alignment and only touches pairings the first pass
 was not confident about. Gaps and weak substitutions go back into a pool and get
-re-matched, best candidate first: identical steps first, needing no threshold,
-then whatever is left by similarity above 0.9 — which is what catches a step that
-was moved *and* edited, since its content differs and only a function that
-ignores output can still recognise it. Whatever pairs remain out of order
-relative to the longest consistent backbone are the ones that moved.
+re-matched, strongest candidate first, by similarity above 0.9 — which is what
+catches a step that was moved *and* edited, since its content differs and only a
+function that ignores output can still recognise it. Whatever pairs remain out of
+order relative to the longest consistent backbone are the ones that moved.
+
+(Identical steps originally got their own earlier pass, on the reasoning that
+exactness is the strongest evidence available. That turned out to be wrong in a
+way worth reading: see [below](#position-has-to-break-the-tie-that-content-cannot).)
 
 It could not just examine gap blocks the way a line differ does. A reordering
 preserves length, so in the common case the first pass emits **no gaps at all** —
@@ -388,13 +391,43 @@ Two more corrections, both to the benchmark rather than the code:
   now scores only what is decidable and returns "no answer" otherwise, which is
   why `duplicate` shows a blank structure column rather than a bad score.
 
+### Position has to break the tie that content cannot
+
+`duplicate` and `compound` were the two classes still failing, and they turned
+out to share a cause worth stating on its own.
+
+The move pass rescued identical steps in a first pass, with no threshold,
+before considering anything else — exactness looked like the strongest possible
+evidence. It is not, once a run contains a copy of one of its own steps.
+`compound` splices in a recovery block that happens to contain a step identical
+to one later in the run, and then edits that later step. Now the copy is an
+*exact* match for the left step while the real counterpart differs by its output.
+Both score similarity 1.0, because similarity ignores output on purpose — so
+exactness cannot separate them, and the "obviously stronger" evidence sent the
+pairing six positions away from where the run said it belonged.
+
+The fix is a single ranking: similarity first, then distance from where the
+step's *settled neighbours* say it belongs. Raw index distance would not do it
+either — after two steps are inserted everything later is two out, and the right
+candidate can be the further one. Anchoring on the nearest confidently-paired
+neighbour carries the local offset. Both classes went to 100%.
+
+Two of the remaining `duplicate` failures were the benchmark's fault again. The
+mutation duplicated a step and then sometimes edited one of the twins, which
+leaves the run holding both the old and the new version of one step — the diff
+can pair the unedited twin and call the edited one an insertion, and that
+describes the same pair of runs. A mutation that tests two things at once cannot
+be scored on either, so the duplicated step is now barred from also being the
+edited one. Scoring was fixed to match: two mutant steps with identical
+signatures are the same answer, and picking between them is a coin toss.
+
 **What is still not solved.** Which *side* of a swap is "the one that moved" is
 genuinely ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier"
 describe one event, the two backbones are the same length, and the tie-break is
 arbitrary. The tests assert the pairing, which is not ambiguous, and explicitly
-allow either labelling. `duplicate` sits at 97.5% localized and 96.8% pairing,
-and `compound` at 97.5%, for the same family of reasons: once a run contains two
-identical steps, no amount of scoring tells you which one the other run meant.
+allow either labelling. `structure` stays at 0% on `adjacent-edit` and 78% on
+`insert+delete` for the reason above: a replacement and a substitution are the
+same shape, and the diff cannot be asked to treat them differently.
 
 ## Architecture
 
@@ -438,7 +471,7 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **99.5%** over 10 mutation classes (396/398) | 63% — index-by-index `zip()` pairing | alignment ≫ zip | met, and one metric still fails |
+| **Divergence localization** | **100%** over 10 mutation classes (398/398) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met, and one metric still fails |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -449,7 +482,7 @@ percent between runs and considerably more between machines; it is quoted with a
 
 Five things these numbers do not say, in descending order of how much they matter:
 
-**The 63% baseline is not a fair fight.** Half the mutation classes change no
+**The 61% baseline is not a fair fight.** Half the mutation classes change no
 lengths at all, and on those index pairing is *correct* — it scores 100%, which
 drags the baseline up from the 0% it scores on insertions and deletions. Read the
 per-class lines in `flightrec bench`, not the average; the single number exists
@@ -461,8 +494,8 @@ others disagree with it, deliberately:
 
 | Metric | Question | Worst class |
 |---|---|---|
-| `localized` | was the changed step paired with its counterpart? | duplicate, 97.5% |
-| `pairing` | was *every* surviving step paired correctly? | duplicate, 96.8% |
+| `localized` | was the changed step paired with its counterpart? | 100% everywhere |
+| `pairing` | was *every* surviving step paired correctly? | 100% everywhere |
 | `blame` | is the first divergence reported the real one? | 100% everywhere |
 | `structure` | are added and removed steps reported as added and removed? | **adjacent-edit, 0%** |
 
@@ -475,7 +508,8 @@ why it is a genuine trade-off rather than a bug to fix.
 each revision found something. The generator started with one mutation class and
 scored 100%; six classes took it to 95% and broke the aligner in two ways; ten
 classes and a fourth metric took it to 99.5% and exposed a case the other three
-metrics were structurally unable to see.
+metrics were structurally unable to see. The three step-level metrics are back at
+100% after fixing what that found — `structure` is not, and it is not going to be.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

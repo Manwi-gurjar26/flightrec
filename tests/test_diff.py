@@ -340,6 +340,30 @@ def test_a_step_that_moved_and_changed_is_reported_as_both() -> None:
     assert diff.moved_count, "and the reordering still has to be reported"
 
 
+def test_a_spliced_in_copy_does_not_steal_its_originals_pairing() -> None:
+    """Position has to break the tie when content cannot.
+
+    Splice in a copy of a step that also exists later, and edit the later one.
+    The copy is now an *exact* match for the left step while the real
+    counterpart differs by its output -- but similarity ignores output, so both
+    score 1.0 and only position separates them. Ranking exact matches ahead of
+    everything else made the copy win, which is six positions from where the
+    surrounding alignment says the step belongs.
+    """
+    left = make_run(CLEAN)
+    original_fetch = CLEAN[3]
+    changed_fetch = ("fetch_page", {"url": "https://w.example/s"}, "recorded on 3 days")
+    right = make_run(
+        CLEAN[:1] + [original_fetch] + CLEAN[1:3] + [changed_fetch] + CLEAN[4:],
+        run_id="b",
+    )
+
+    column = next(c for c in diff_runs(left, right).columns if c.left_index == 3)
+
+    assert column.right_index == 4, "should pair with the counterpart, not the copy"
+    assert column.op is Op.CHANGED
+
+
 def test_move_recovery_does_not_invent_moves_in_an_ordinary_insertion() -> None:
     """A pass that re-pairs after the fact can invent correspondences.
 

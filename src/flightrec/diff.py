@@ -395,7 +395,7 @@ def _recover_moves(
     if not weak_left or not weak_right:
         return columns
 
-    rescued = _rescue(left, right, weak_left, weak_right)
+    rescued = _rescue(left, right, weak_left, weak_right, confident)
     if not rescued:
         return columns
 
@@ -403,57 +403,63 @@ def _recover_moves(
     return _rebuild(left, right, pairs, _out_of_order(pairs))
 
 
+def _expected_position(index: int, confident: dict[int, int]) -> int:
+    """Where a leftover step ought to land, judged by its settled neighbours.
+
+    Raw index distance is the wrong measure once anything has shifted: after two
+    steps are inserted, every later step is two out, and a candidate six
+    positions away can be the correct one. The nearest confidently-paired
+    neighbour carries the local offset, so this asks "how far is this candidate
+    from where the run around it says it belongs" instead.
+    """
+    if not confident:
+        return index
+    anchor = min(confident, key=lambda i: (abs(i - index), i))
+    return confident[anchor] + (index - anchor)
+
+
 def _rescue(
     left: list[Span],
     right: list[Span],
     weak_left: list[int],
     weak_right: list[int],
+    confident: dict[int, int],
 ) -> dict[int, int]:
-    """Pair up leftover steps, certainty first, best candidate first.
+    """Pair up leftover steps, strongest candidate first.
 
-    Both passes go through the candidate list globally rather than walking the
-    left steps in order, and that is not a detail. Taking them in left order
-    lets an early step claim a partner that a later one matches better -- in a
-    run with two steps deleted, a deleted step would reach the changed step's
-    counterpart first and pair with it, which loses the deletion *and* the edit
-    in one move. Best-first gives every candidate its strongest partner.
+    Candidates are ranked globally rather than by walking the left steps in
+    order, and that is not a detail. Taking them in left order lets an early
+    step claim a partner that a later one matches better -- in a run with two
+    steps deleted, a deleted step would reach the changed step's counterpart
+    first and pair with it, losing the deletion *and* the edit in one move.
+
+    Ranking is similarity first, then how far the candidate sits from where the
+    surrounding alignment says the step belongs. There is no separate pass for
+    identical steps: an exact match always scores 1.0 here, because similarity
+    ignores output. Giving exactness its own earlier pass looked equivalent and
+    was not -- a step whose *copy* had been spliced in elsewhere would be
+    claimed by the copy, which is an exact match, in preference to its real
+    counterpart three positions away whose output had changed. Both score 1.0;
+    only position separates them, and position has to be allowed to do it.
+
+    Anything below the threshold is left unpaired. An unexplained step is a
+    better answer than a confident wrong pairing.
     """
     available = set(weak_right)
     rescued: dict[int, int] = {}
 
-    def take(order: list[tuple[Any, ...]]) -> None:
-        for *_, i, j in order:
-            if i in rescued or j not in available:
-                continue
-            rescued[i] = j
-            available.discard(j)
-
-    # Pass one: identical content. A step that appears verbatim on both sides is
-    # the same step whatever the alignment decided, so this needs no threshold --
-    # only a tie-break, by distance, because when a run contains the same step
-    # twice, assuming the far one moved is a worse guess than the near one.
-    take(
-        sorted(
-            (abs(j - i), i, j)
-            for i in weak_left
-            for j in weak_right
-            if step_signature(left[i]) == step_signature(right[j])
-        )
+    scored = sorted(
+        (-score, abs(j - _expected_position(i, confident)), i, j)
+        for i in weak_left
+        for j in weak_right
+        if (score := similarity(left[i], right[j])) >= MOVE_CONFIDENCE
     )
 
-    # Pass two: what is left, by similarity. This is what catches the step that
-    # was moved *and* edited -- its content differs, so pass one cannot see it,
-    # and similarity ignores output precisely so that it still matches here.
-    # Anything below the threshold is left unpaired: an unexplained step is a
-    # better answer than a confident wrong pairing.
-    scored = [
-        (-score, abs(j - i), i, j)
-        for i in weak_left
-        if i not in rescued
-        for j in available
-        if (score := similarity(left[i], right[j])) >= MOVE_CONFIDENCE
-    ]
-    take(sorted(scored))
+    for *_, i, j in scored:
+        if i in rescued or j not in available:
+            continue
+        rescued[i] = j
+        available.discard(j)
 
     return rescued
 

@@ -294,6 +294,21 @@ class Mutation:
     changed: set[int]
     removed: set[int] = field(default_factory=set)
 
+    def _equivalent(self, got: int | None, truth: int | None) -> bool:
+        """Did the diff pick a mutant step indistinguishable from the right one?
+
+        Duplicating a step verbatim leaves two identical steps, and no amount of
+        analysis says which one the other run "meant" -- they are the same
+        content in the same run. Scoring the diff on that choice measures a coin
+        toss, so an identical signature counts as the same answer.
+        """
+        if got == truth:
+            return True
+        if got is None or truth is None:
+            return False
+        steps = self.mutant.steps()
+        return step_signature(steps[got]) == step_signature(steps[truth])
+
     def localized_by(self, diff: Any) -> bool:
         """Is every changed step paired with its counterpart and marked changed?
 
@@ -305,7 +320,7 @@ class Mutation:
             column = next((c for c in diff.columns if c.left_index == step), None)
             if (
                 column is None
-                or column.right_index != self.expected.get(step)
+                or not self._equivalent(column.right_index, self.expected.get(step))
                 or column.op is not Op.CHANGED
             ):
                 return False
@@ -402,7 +417,9 @@ class Mutation:
             for c in diff.columns
             if c.left_index is not None
         }
-        hits = sum(1 for k, v in self.expected.items() if paired.get(k) == v)
+        hits = sum(
+            1 for k, v in self.expected.items() if self._equivalent(paired.get(k), v)
+        )
         return hits / len(self.expected)
 
 
@@ -441,17 +458,25 @@ def _inject(block: list[Span]) -> list[Row]:
     return [(None, span.model_copy(deep=True)) for span in block]
 
 
-def _change_a_tool(rows: list[Row], rng: random.Random, after: int = 0) -> int | None:
+def _change_a_tool(
+    rows: list[Row],
+    rng: random.Random,
+    after: int = 0,
+    exclude: set[int] | None = None,
+) -> int | None:
     """Perturb one surviving tool step's output; return which original it was.
 
     Tool steps rather than model steps: a tool result is where a divergence
     actually originates, and it is the kind of change somebody would be trying
     to find.
     """
+    barred = exclude or set()
     candidates = [
         i
         for i in range(after, len(rows))
-        if rows[i][0] is not None and rows[i][1].kind is SpanKind.TOOL
+        if rows[i][0] is not None
+        and rows[i][0] not in barred
+        and rows[i][1].kind is SpanKind.TOOL
     ]
     if not candidates:
         return None
@@ -580,7 +605,14 @@ def _mutate_duplicate(rows: list[Row], block: list[Span], rng: random.Random):
     target = rng.randrange(source + 1, len(rows))
     copy = rows[source][1].model_copy(deep=True)
     rows = rows[:target] + [(None, copy)] + rows[target:]
-    changed = _change_a_tool(rows, rng)
+
+    # The duplicated step is barred from also being the changed one. Editing one
+    # twin leaves the run holding both the old and the new version of a step,
+    # and then "which one does the other run mean" has two equally coherent
+    # answers -- the diff can pair the unedited twin and call the edited one an
+    # insertion, which describes the same pair of runs. Scoring that measures
+    # nothing, and a mutation should test one thing at a time.
+    changed = _change_a_tool(rows, rng, exclude={rows[source][0]})
     return rows, {changed} if changed is not None else set()
 
 
