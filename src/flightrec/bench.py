@@ -32,6 +32,7 @@ from flightrec.spans import (
     Span,
     SpanKind,
     first_divergence,
+    step_signature,
 )
 
 DEFAULT_RUNS = 40
@@ -144,15 +145,30 @@ class KindResult:
     naive: int = 0
     aligned_pairing: float = 0.0
     naive_pairing: float = 0.0
+    blamed: int = 0
+    blame_total: int = 0
+    structure: float = 0.0
+    structure_total: int = 0
 
     def rate(self, hits: int) -> float:
         return 100.0 * hits / self.total if self.total else 0.0
 
     def line(self) -> str:
+        blame = (
+            f"   blame {100.0 * self.blamed / self.blame_total:5.1f}%"
+            if self.blame_total
+            else ""
+        )
         return (
             f"{self.kind:<14} localized {self.rate(self.aligned):5.1f}% "
             f"(zip {self.rate(self.naive):5.1f}%)   "
             f"pairing {self.aligned_pairing:5.1f}% (zip {self.naive_pairing:5.1f}%)"
+            f"{blame}"
+            + (
+                f"   structure {self.structure:5.1f}%"
+                if self.structure_total
+                else ""
+            )
         )
 
 
@@ -173,7 +189,7 @@ def localization_by_kind(
         # not shift the mutants every other class gets.
         rng = random.Random(20240812)
         result = KindResult(kind=kind)
-        aligned_pairing, naive_pairing = 0.0, 0.0
+        aligned_pairing, naive_pairing, structure_sum = 0.0, 0.0, 0.0
 
         for seed in seeds:
             mutation = mutate(record(seed), block, rng, kind=kind)
@@ -190,9 +206,21 @@ def localization_by_kind(
             aligned_pairing += mutation.pairing_accuracy(aligned)
             naive_pairing += mutation.pairing_accuracy(naive)
 
+            blamed = mutation.blamed_correctly(aligned)
+            if blamed is not None:
+                result.blame_total += 1
+                result.blamed += int(blamed)
+
+            structure = mutation.structure_accuracy(aligned)
+            if structure is not None:
+                result.structure_total += 1
+                structure_sum += structure
+
         if result.total:
             result.aligned_pairing = 100.0 * aligned_pairing / result.total
             result.naive_pairing = 100.0 * naive_pairing / result.total
+        if result.structure_total:
+            result.structure = 100.0 * structure_sum / result.structure_total
         results.append(result)
 
     return results
@@ -233,10 +261,17 @@ def measure_divergence_localization(seeds: range) -> Measurement:
         ),
         breakdown=[r.line() for r in results],
         caveat=(
-            "an average over mutation classes, and the classes are not equally "
-            "hard -- read the per-class lines, not this number. Insertions are "
-            "real recorded recovery blocks; the rest are synthetic edits, and "
-            "where each one lands is chosen by a seeded RNG"
+            "the headline averages one metric over unequal classes -- read the "
+            "per-class lines. Four things are scored and they disagree: "
+            "'localized' is the changed step paired with its counterpart, "
+            "'pairing' is every surviving step, 'blame' is whether the first "
+            "reported divergence is the real one (only where nothing structural "
+            "happened), and 'structure' is whether added and removed steps are "
+            "reported as added and removed. Structure is the one that still "
+            "fails: adjacent-edit scores 0% because a replacement is "
+            "indistinguishable from a tool substitution, which the diff is "
+            "asked to pair. Blank columns mean the metric has no answer for "
+            "that class, not a perfect score"
         ),
     )
 
@@ -275,6 +310,82 @@ class Mutation:
             ):
                 return False
         return True
+
+    @property
+    def structural(self) -> bool:
+        """Did this mutation add, remove or reorder anything?"""
+        if self.removed or len(self.mutant.steps()) != len(self.expected):
+            return True
+        order = [self.expected[k] for k in sorted(self.expected)]
+        return any(a > b for a, b in zip(order, order[1:]))
+
+    def blamed_correctly(self, diff: Any) -> bool | None:
+        """Does the diff point a human at the step that actually changed?
+
+        ``None`` when the mutation is structural, because then an insertion or a
+        reordering legitimately comes first and blaming it is not wrong. Only
+        where the *sole* genuine difference is a changed result is there a right
+        answer -- and that is the case worth checking, because it is where a
+        cosmetic rewording can be blamed instead.
+        """
+        if self.structural:
+            return None
+        column = diff.first_divergence
+        return column is not None and column.left_index in self.changed
+
+    def structure_accuracy(self, diff: Any) -> float | None:
+        """Are added and removed steps reported as added and removed?
+
+        Neither of the other two metrics can see this. ``pairing_accuracy`` only
+        scores steps that *survived*, and ``localized_by`` only looks at the
+        changed one -- so a diff that pairs two unrelated steps as "changed"
+        where the truth is "one removed, one added" scores 100% on both while
+        telling a human that two steps correspond when they have nothing to do
+        with each other.
+
+        Only *decidable* additions and removals are scored, and getting that
+        wrong made this metric report failures that were the metric's fault:
+
+        * a step injected as a copy of one that was deleted elsewhere is a
+          **move**, and the diff is right to call it one;
+        * a step duplicated verbatim leaves two identical steps, and which twin
+          is "the extra one" has no answer at all.
+
+        In both cases the diff was being marked down for describing the run
+        correctly. Anything whose signature is not unique is excluded, and
+        ``None`` comes back when that leaves nothing to score.
+        """
+        mutant_steps = self.mutant.steps()
+        original_steps = self.original.steps()
+        injected = set(range(len(mutant_steps))) - set(self.expected.values())
+
+        # Everything the *other* run contains, plus everything that survived.
+        # An injected step is only accountable if nothing anywhere could be
+        # mistaken for it -- including a step it was copied from before that
+        # step was edited, which is why the original run is scanned whole.
+        elsewhere = {step_signature(step) for step in original_steps}
+        elsewhere |= {step_signature(mutant_steps[j]) for j in self.expected.values()}
+
+        accountable_injected = {
+            j for j in injected if step_signature(mutant_steps[j]) not in elsewhere
+        }
+        injected_signatures = {step_signature(mutant_steps[j]) for j in injected}
+        accountable_removed = {
+            i
+            for i in self.removed
+            if step_signature(original_steps[i]) not in injected_signatures
+        }
+
+        expected_gaps = len(accountable_injected) + len(accountable_removed)
+        if not expected_gaps:
+            return None
+
+        gapped_left = {c.left_index for c in diff.columns if c.right_index is None}
+        gapped_right = {c.right_index for c in diff.columns if c.left_index is None}
+        hits = len(accountable_removed & gapped_left) + len(
+            accountable_injected & gapped_right
+        )
+        return hits / expected_gaps
 
     def pairing_accuracy(self, diff: Any) -> float:
         """Fraction of surviving steps paired with their true counterpart.
@@ -402,6 +513,116 @@ def _mutate_reorder(rows: list[Row], block: list[Span], rng: random.Random):
     return rows, {changed} if changed is not None else set()
 
 
+def _reword(span: Span) -> bool:
+    """Change a step's arguments without changing anything it produced.
+
+    The demo model does this for real above temperature 0. A diff that blames a
+    rewording for a failure sends somebody hunting through a prompt for a bug
+    that is in a tool result three steps later.
+    """
+    inputs = span.attr(FR_INPUT)
+    if not isinstance(inputs, dict):
+        return False
+    for key, value in inputs.items():
+        if isinstance(value, str) and value:
+            words = value.split()
+            span.attributes[FR_INPUT] = {
+                **inputs,
+                key: " ".join(reversed(words)) if len(words) > 1 else value + "?",
+            }
+            return True
+    return False
+
+
+def _mutate_adjacent_edit(rows: list[Row], block: list[Span], rng: random.Random):
+    """An insertion with a deletion immediately after it.
+
+    Aimed at a documented restriction in the alignment: it never transitions
+    straight from a gap on one side to a gap on the other, so an inserted block
+    butted directly against a removed one is not expressible as what it is. That
+    was a deliberate choice and it had never been tested.
+
+    The injected steps are made unmatchable first, and that is the whole
+    difficulty. Splicing in a *copy* of real steps does not test this at all:
+    the copies match their neighbours, the aligner slips a match between the two
+    gaps, and the adjacency it was supposed to be forced into never happens.
+    The first version of this mutation did exactly that and scored 100% while
+    measuring nothing.
+    """
+    at = rng.randrange(1, max(2, len(rows) - 4))
+    rows = rows[:at] + _inject([_make_distinct(s, at) for s in block]) + rows[at:]
+    cut = at + len(block)
+    rows = rows[:cut] + rows[cut + 2 :]
+    changed = _change_a_tool(rows, rng, after=cut)
+    return rows, {changed} if changed is not None else set()
+
+
+def _make_distinct(span: Span, tag: int) -> Span:
+    """A step that cannot be matched to anything else in either run."""
+    copy = span.model_copy(deep=True)
+    copy.name = f"{copy.name}.injected{tag}"
+    if copy.attributes.get(GEN_AI_TOOL_NAME):
+        copy.attributes[GEN_AI_TOOL_NAME] = f"injected_tool_{tag}"
+    copy.attributes[FR_INPUT] = {"injected": f"unmatchable-{tag}"}
+    copy.attributes[FR_OUTPUT] = f"unmatchable output {tag}"
+    return copy
+
+
+def _mutate_duplicate(rows: list[Row], block: list[Span], rng: random.Random):
+    """A step copied verbatim to somewhere else in the run.
+
+    Aimed at the move pass, which rescues identical steps first and assumes a
+    signature identifies one step. Two identical candidates at different
+    distances make that assumption false, and the wrong choice invents a move
+    that never happened.
+    """
+    source = rng.randrange(1, len(rows) - 1)
+    target = rng.randrange(source + 1, len(rows))
+    copy = rows[source][1].model_copy(deep=True)
+    rows = rows[:target] + [(None, copy)] + rows[target:]
+    changed = _change_a_tool(rows, rng)
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_compound(rows: list[Row], block: list[Span], rng: random.Random):
+    """An insertion, a reordering and two edits in one run.
+
+    Every other class isolates a single kind of difference, which is convenient
+    for attributing a failure and unlike anything that happens in practice: real
+    runs diverge in several ways at once, and the edits interact.
+    """
+    at = rng.randrange(1, max(2, len(rows) // 3))
+    rows = rows[:at] + _inject(block) + rows[at:]
+
+    start = rng.randrange(at + len(block), max(at + len(block) + 1, len(rows) - 3))
+    moved = rows[start : start + 2]
+    rest = rows[:start] + rows[start + 2 :]
+    to = rng.randrange(start, len(rest)) if start < len(rest) else len(rest)
+    rows = rest[:to] + moved + rest[to:]
+
+    first = _change_a_tool(rows, rng)
+    second = _change_a_tool(rows, rng, after=len(rows) // 2)
+    return rows, {c for c in (first, second) if c is not None}
+
+
+def _mutate_cosmetic_noise(rows: list[Row], block: list[Span], rng: random.Random):
+    """Several arguments reworded to no effect, and one result genuinely changed.
+
+    No structural edit, so there is exactly one thing here worth blaming and the
+    diff has to blame it rather than the nearest rewording.
+    """
+    tools = [
+        i
+        for i, (origin, span) in enumerate(rows)
+        if origin is not None and span.kind is SpanKind.TOOL
+    ]
+    changed = _change_a_tool(rows, rng)
+    for index in rng.sample(tools, min(3, len(tools))):
+        if rows[index][0] != changed:
+            _reword(rows[index][1])
+    return rows, {changed} if changed is not None else set()
+
+
 def _mutate_substitute(rows: list[Row], block: list[Span], rng: random.Random):
     """One tool call becomes a different tool call in the same slot."""
     candidates = [
@@ -429,6 +650,10 @@ MUTATORS = {
     "double-change": _mutate_double_change,
     "reorder": _mutate_reorder,
     "substitute": _mutate_substitute,
+    "adjacent-edit": _mutate_adjacent_edit,
+    "duplicate": _mutate_duplicate,
+    "compound": _mutate_compound,
+    "cosmetic-noise": _mutate_cosmetic_noise,
 }
 
 

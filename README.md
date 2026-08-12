@@ -260,10 +260,11 @@ mode this project is about.
 
 The first version of that benchmark scored 100%, which was a fact about the
 benchmark rather than about the aligner: it only ever injected one insertion and
-one changed result. Six mutation classes now run separately — insertion,
-deletion, insertion *and* deletion, two changes at once, reordering, and one
-tool substituted for another — and they are scored separately, because an
-average over classes hides a total failure behind five easy passes.
+one changed result. Six classes replaced it — insertion, deletion, insertion
+*and* deletion, two changes at once, reordering, and one tool substituted for
+another — scored separately, because an average over classes hides a total
+failure behind five easy passes. (Four harder ones came later; see
+[below](#making-the-corpus-harder-again-and-the-metric-that-could-not-see).)
 
 Two of them broke it. Both are fixed; what follows is what they were, because
 the second fix is the more interesting half of this section.
@@ -340,18 +341,60 @@ in phrasing, **on precisely the steps where those runs went wrong**.
 The pairing damage was a side effect: a column called cosmetic is treated as
 settled, so the move pass never re-examined it, and a step that had an exact
 match waiting three positions away stayed paired with a stranger. Comparing the
-message fixed both numbers at once — localization and pairing are now 100% on all
-six classes — but the classification bug was the more serious half, and it would
-have survived any amount of work on the aligner.
+message fixed both numbers at once — localization and pairing reached 100% on all
+six classes then in play — but the classification bug was the more serious half,
+and it would have survived any amount of work on the aligner.
 
 `step_signature` had the same hole and got the same fix, so `MATCH` cannot claim
 two steps are identical when they failed for different reasons.
+
+### Making the corpus harder again, and the metric that could not see
+
+Six classes with every number at 100% is a benchmark that has stopped
+discriminating. Four more were added — an insertion butted directly against a
+deletion, a step duplicated verbatim elsewhere, several edits compounded into one
+run, and a run where most arguments are reworded to no effect and exactly one
+result genuinely changes.
+
+The first thing that fell out was not about the aligner. **All three existing
+metrics were blind to an entire class of wrong answer.** `localized` looks only
+at the changed step; `pairing` scores only steps that *survived*. Neither can see
+a diff that pairs two completely unrelated steps and calls it a change, where the
+truth is "one removed, one unrelated one added". So a fourth metric now asks
+whether added and removed steps are reported as added and removed — and
+`adjacent-edit` scores **0%** on it while scoring 100% on everything else.
+
+**That one is a genuine trade-off, not a bug.** The aligner pairs the injected
+steps with the deleted ones because two gap blocks cost −2.9 and two weak
+substitutions cost −1.2. It could be made to prefer gapping, except that
+"one step replaced by an unrelated step" is *locally identical* to a tool
+substitution — same shape, same similarity of about 0.2 — and the `substitute`
+class exists because pairing those is what the diff is supposed to do. The two
+expectations contradict each other. Tuning until both pass is not possible;
+picking one and calling the other a limitation is honest.
+
+Two more corrections, both to the benchmark rather than the code:
+
+- **`adjacent-edit` was vacuous when first written.** It spliced in a *copy* of
+  real steps, which matched their neighbours, so the aligner slipped a match
+  between the two gaps and the adjacency it was built to force never happened. It
+  scored 100% while measuring nothing — the same failure as the affine-gap test
+  in section 3, made twice. The injected steps are now unmatchable by
+  construction, and a test asserts it.
+- **The structure metric reported failures that were its own fault.** A step
+  injected as a copy of one deleted elsewhere *is* a move and the diff was right
+  to say so; a step duplicated verbatim leaves two identical steps and which twin
+  is "the extra one" has no answer. Both were being marked wrong. Ground truth
+  now scores only what is decidable and returns "no answer" otherwise, which is
+  why `duplicate` shows a blank structure column rather than a bad score.
 
 **What is still not solved.** Which *side* of a swap is "the one that moved" is
 genuinely ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier"
 describe one event, the two backbones are the same length, and the tie-break is
 arbitrary. The tests assert the pairing, which is not ambiguous, and explicitly
-allow either labelling.
+allow either labelling. `duplicate` sits at 97.5% localized and 96.8% pairing,
+and `compound` at 97.5%, for the same family of reasons: once a run contains two
+identical steps, no amount of scoring tells you which one the other run meant.
 
 ## Architecture
 
@@ -395,7 +438,7 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **100%** over 6 mutation classes (238/238) | 55% — index-by-index `zip()` pairing | alignment ≫ zip | met |
+| **Divergence localization** | **99.5%** over 10 mutation classes (396/398) | 63% — index-by-index `zip()` pairing | alignment ≫ zip | met, and one metric still fails |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -406,18 +449,33 @@ percent between runs and considerably more between machines; it is quoted with a
 
 Five things these numbers do not say, in descending order of how much they matter:
 
-**The 55% baseline is not a fair fight.** Three of the six mutation classes
-change no lengths at all, and on those index pairing is *correct* — it scores
-100%, which drags the baseline up from the 0% it scores on insertions and
-deletions. Read the per-class lines in `flightrec bench`, not the average; the
-single number exists because the table asked for one.
+**The 63% baseline is not a fair fight.** Half the mutation classes change no
+lengths at all, and on those index pairing is *correct* — it scores 100%, which
+drags the baseline up from the 0% it scores on insertions and deletions. Read the
+per-class lines in `flightrec bench`, not the average; the single number exists
+because the table asked for one.
 
-**The 100% is a second attempt, and the first one was 95%.** Two mutation classes
-broke the aligner when the generator was made adversarial enough to produce them,
-and the fix — a move-recovery pass — introduced three further bugs of its own
-before it settled, one of which made deletions *worse* than no fix at all.
-[Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong) has all
-of it, including the part that is still ambiguous.
+**One number is the wrong thing to read here, and the harness prints four.**
+Localization is only "was the changed step paired with its counterpart". Three
+others disagree with it, deliberately:
+
+| Metric | Question | Worst class |
+|---|---|---|
+| `localized` | was the changed step paired with its counterpart? | duplicate, 97.5% |
+| `pairing` | was *every* surviving step paired correctly? | duplicate, 96.8% |
+| `blame` | is the first divergence reported the real one? | 100% everywhere |
+| `structure` | are added and removed steps reported as added and removed? | **adjacent-edit, 0%** |
+
+A blank column means the metric has no answer for that class — not a perfect
+score. `structure` is the one that still fails, and
+[Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong) explains
+why it is a genuine trade-off rather than a bug to fix.
+
+**These numbers have been revised down twice by making the corpus harsher**, and
+each revision found something. The generator started with one mutation class and
+scored 100%; six classes took it to 95% and broke the aligner in two ways; ten
+classes and a fourth metric took it to 99.5% and exposed a case the other three
+metrics were structurally unable to see.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

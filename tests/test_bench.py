@@ -30,7 +30,7 @@ from flightrec.bench import (
 from flightrec.demo.agent import ResearchAgent
 from flightrec.demo.tools import GROUND_TRUTH, FaultConfig
 from flightrec.diff import Op, diff_runs, diff_runs_by_index
-from flightrec.spans import FR_OUTPUT, SpanKind
+from flightrec.spans import FR_OUTPUT, SpanKind, step_signature
 
 SEEDS = range(8)
 
@@ -188,6 +188,56 @@ def test_index_pairing_really_does_miss_the_injected_step() -> None:
 
     assert column.right_index == changed
     assert column.right_index != mutation.expected[changed]
+
+
+def test_the_adjacent_edit_injects_something_unmatchable() -> None:
+    """Guard against the way this mutation was vacuous when first written.
+
+    It splices a block in and deletes the steps immediately after, to force the
+    alignment into a gap-on-one-side-then-gap-on-the-other it does not express.
+    Splicing a *copy* of real steps does not do that: the copies match their
+    neighbours, the aligner slips a match between the two gaps, and the case it
+    was built for never arises. It scored 100% while testing nothing.
+    """
+    mutation = mutate(record(0), recovery_block(), random.Random(7), kind="adjacent-edit")
+    assert mutation is not None
+
+    original = {step_signature(s) for s in mutation.original.steps()}
+    injected = [
+        s
+        for j, s in enumerate(mutation.mutant.steps())
+        if j not in set(mutation.expected.values())
+    ]
+
+    assert injected, "the mutation must actually inject something"
+    assert all(step_signature(s) not in original for s in injected)
+    assert mutation.removed, "and must actually delete something"
+
+
+def test_structure_has_no_answer_for_a_duplicated_step() -> None:
+    """Ground truth has to admit when it does not know.
+
+    Duplicating a step verbatim leaves two identical steps, and which twin is
+    "the extra one" is undecidable -- so scoring the diff on it would penalise a
+    correct answer. The metric reports no result rather than a failure.
+    """
+    mutation = mutate(record(0), recovery_block(), random.Random(8), kind="duplicate")
+    assert mutation is not None
+
+    assert mutation.structure_accuracy(diff_runs(mutation.original, mutation.mutant)) is None
+
+
+def test_cosmetic_noise_blames_the_real_change_not_the_rewording() -> None:
+    """Several arguments reworded to no effect, one result genuinely changed.
+
+    Blaming a rewording sends somebody hunting through a prompt for a bug that
+    is in a tool result three steps away, which is this tool's most likely way
+    of wasting an afternoon.
+    """
+    result = next(r for r in localization_by_kind(SEEDS) if r.kind == "cosmetic-noise")
+
+    assert result.blame_total == result.total, "every case must be blame-scoreable"
+    assert result.blamed == result.blame_total
 
 
 def test_a_deletion_mutant_makes_the_mutant_shorter() -> None:
