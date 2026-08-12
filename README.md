@@ -448,19 +448,46 @@ rather than `100%`. Two tests guard the rule from being widened until nothing is
 left — one asserts the metric still scores whole classes, the other that it still
 *fails* the class it should.
 
-**What is still not solved.** `adjacent-edit` scores 0% on `structure`, over all
-40 of its cases, and that one is real: it injects a tool that appears nowhere in
-the other run, so "nothing here corresponds" is the only true description rather
-than one of two. The diff pairs those steps anyway because two gap blocks cost
-−2.9 and two weak substitutions cost −1.2 — and it cannot simply be made to
-prefer gapping, because "one step replaced by an unrelated step" is locally
-identical to a tool substitution, which the `substitute` class exists to check it
-pairs. The two expectations contradict each other.
+### The last one was not a scoring problem. It was a word.
 
-Which *side* of a swap is "the one that moved" also stays ambiguous — "steps 1–2
-happened later" and "steps 3–4 happened earlier" describe one event, the two
-backbones are the same length, and the tie-break is arbitrary. The tests assert
-the pairing, which is not ambiguous, and explicitly allow either labelling.
+`adjacent-edit` scored 0% on `structure` over all 40 of its cases, and unlike the
+three above it was not the ground truth's fault. It injects a tool that appears
+nowhere in the other run, so "nothing here corresponds" really is the only true
+description. The diff paired those steps anyway, because two gap blocks cost
+−2.9 and two weak substitutions cost −1.2.
+
+Making it prefer gapping was not available. "One step replaced by an unrelated
+step" is *locally identical* to a tool substitution — same shape, similarity
+about 0.2 — and the `substitute` class exists precisely to check that those get
+paired. Tuning until both passed was impossible; the two expectations
+contradicted each other. The fourth attempt at this section said so and stopped.
+
+That was the wrong conclusion, and the tell is that the contradiction was between
+two *reports*, not two behaviours. The diff had one word, `changed`, doing two
+jobs:
+
+| | |
+|---|---|
+| `changed` | the same step, with a different result |
+| `replaced` | a different step, in the same place |
+
+Splitting them dissolves it. The columns stay paired, because where a step sits
+is worth seeing and the substitution case needs it — but `replaced` states
+outright that the two steps do not correspond, which is the same claim a gap
+makes, in a form that keeps the position. `structure` accepts it for that reason,
+and every class now reaches 100%.
+
+The general shape of this is worth keeping: **a metric that cannot be satisfied
+by any behaviour is sometimes telling you the vocabulary is too small, not that
+the goal is unreachable.** A `fetch_page` becoming a `calculator` is not that
+call returning something new; it is the agent doing something else, and reporting
+both as "changed" was the diff's last claim that outran what it knew.
+
+**What is still not solved.** Which *side* of a swap is "the one that moved" is
+ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier" describe
+one event, the two backbones are the same length, and the tie-break is arbitrary.
+The tests assert the pairing, which is not ambiguous, and explicitly allow either
+labelling.
 
 ## Architecture
 
@@ -504,7 +531,7 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **100%** over 10 mutation classes (398/398) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met, and one metric still fails |
+| **Divergence localization** | **100%** over 10 mutation classes (398/398) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -530,7 +557,7 @@ others disagree with it, deliberately:
 | `localized` | was the changed step paired with its counterpart? | 100% everywhere |
 | `pairing` | was *every* surviving step paired correctly? | 100% everywhere |
 | `blame` | is the first divergence reported the real one? | 100% everywhere |
-| `structure` | are added and removed steps reported as added and removed? | **adjacent-edit, 0%** |
+| `structure` | are added and removed steps reported as added and removed? | 100% everywhere |
 
 `blame` and `structure` do not apply to every mutant and print their
 denominators for that reason — `structure 100% (8/38)` is a different claim from
@@ -538,16 +565,17 @@ denominators for that reason — `structure 100% (8/38)` is a different claim fr
 quoted without its limits.
 
 A blank column means the metric has no answer for that class — not a perfect
-score. `structure` is the one that still fails, and
-[Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong) explains
-why it is a genuine trade-off rather than a bug to fix.
+score. All four reach 100%, but only after the last one forced a change to what
+the diff *says*: see
+[Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong).
 
 **These numbers have been revised down twice by making the corpus harsher**, and
 each revision found something. The generator started with one mutation class and
 scored 100%; six classes took it to 95% and broke the aligner in two ways; ten
 classes and a fourth metric took it to 99.5% and exposed a case the other three
-metrics were structurally unable to see. The three step-level metrics are back at
-100% after fixing what that found — `structure` is not, and it is not going to be.
+metrics were structurally unable to see. All four are back at 100% after fixing
+what that found — including one fix that was not to the aligner or the scoring
+but to the vocabulary the diff reports in.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

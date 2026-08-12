@@ -309,6 +309,7 @@ _DIFF_MARKS = {
     "match": "=",
     "cosmetic": "~",
     "changed": "!",
+    "replaced": "x",
     "removed": "-",
     "inserted": "+",
 }
@@ -349,6 +350,8 @@ def _cmd_diff(args: argparse.Namespace) -> int:
                 f"{_short(_outcome_text(column.left))}"
                 f"  ->  {_short(_outcome_text(column.right))}"
             )
+        elif column.op is Op.REPLACED:
+            detail = "a different step, not a different result"
         elif column.op is Op.COSMETIC:
             detail = "reworded, same result"
         if column.moved:
@@ -360,8 +363,9 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     counts = diff.counts
     print(
         f"\n{counts[Op.MATCH]} identical, {counts[Op.COSMETIC]} cosmetic, "
-        f"{counts[Op.CHANGED]} changed, {counts[Op.REMOVED]} only in left, "
-        f"{counts[Op.INSERTED]} only in right, {diff.moved_count} reordered"
+        f"{counts[Op.CHANGED]} changed, {counts[Op.REPLACED]} replaced, "
+        f"{counts[Op.REMOVED]} only in left, {counts[Op.INSERTED]} only in right, "
+        f"{diff.moved_count} reordered"
     )
 
     divergence = diff.first_divergence

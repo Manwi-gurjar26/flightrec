@@ -332,7 +332,10 @@ class Mutation:
             if (
                 column is None
                 or not self._equivalent(column.right_index, self.expected.get(step))
-                or column.op is not Op.CHANGED
+                # REPLACED counts: the substitute class turns one tool call into
+                # a different one, and "this is a different step" is a correct
+                # report of that, not a miss.
+                or column.op not in (Op.CHANGED, Op.REPLACED)
             ):
                 return False
         return True
@@ -425,10 +428,23 @@ class Mutation:
         if not expected_gaps:
             return None
 
-        gapped_left = {c.left_index for c in diff.columns if c.right_index is None}
-        gapped_right = {c.right_index for c in diff.columns if c.left_index is None}
-        hits = len(accountable_removed & gapped_left) + len(
-            accountable_injected & gapped_right
+        # A step counts as "reported gone" when the diff gaps it, and also when
+        # the diff pairs it but says REPLACED -- which states outright that the
+        # two steps do not correspond. That is the same claim a gap makes, in a
+        # form that keeps the position visible, and refusing to accept it would
+        # be scoring a presentation choice rather than a correctness one.
+        disowned_left = {
+            c.left_index
+            for c in diff.columns
+            if c.right_index is None or c.op is Op.REPLACED
+        }
+        disowned_right = {
+            c.right_index
+            for c in diff.columns
+            if c.left_index is None or c.op is Op.REPLACED
+        }
+        hits = len(accountable_removed & disowned_left) + len(
+            accountable_injected & disowned_right
         )
         return hits / expected_gaps
 

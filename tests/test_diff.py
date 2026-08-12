@@ -149,7 +149,10 @@ def test_an_inserted_retry_block_is_the_only_difference_reported() -> None:
     assert aligned.count(Op.MATCH) == len(CLEAN)
     assert aligned.count(Op.CHANGED) == 0
     # The control: without alignment, everything after the insertion is garbage.
-    assert naive.count(Op.CHANGED) >= 4
+    # Counted as changed *or* replaced, since a mispairing that lands on a
+    # different tool is reported as a replacement -- still garbage, still the
+    # point.
+    assert naive.count(Op.CHANGED) + naive.count(Op.REPLACED) >= 4
 
 
 def gap_blocks(diff, op: Op) -> list[list[int]]:
@@ -220,7 +223,11 @@ def test_the_gap_penalty_never_outbids_a_real_similarity_signal() -> None:
         run_id="b",
     )
 
-    paired = next(c for c in diff_runs(left, right).columns if c.op is Op.CHANGED)
+    paired = next(
+        c
+        for c in diff_runs(left, right).columns
+        if c.op in (Op.CHANGED, Op.REPLACED) and c.left_index == 1
+    )
 
     assert paired.right.kind is SpanKind.TOOL
     assert paired.right.attr(GEN_AI_TOOL_NAME) == "fetch_page"
@@ -425,6 +432,37 @@ def test_a_reworded_query_that_changed_the_result_is_a_divergence() -> None:
 
     assert diff.count(Op.COSMETIC) == 0
     assert diff.divergence_index == 1
+
+
+def test_a_different_tool_is_replaced_not_changed() -> None:
+    """"Changed" claims two steps are the same step. Sometimes they are not.
+
+    A ``fetch_page`` becoming a ``calculator`` is not that call returning
+    something new -- it is the agent doing something else. The columns stay
+    paired, because their position is worth seeing, but the report says so.
+    """
+    left = make_run(CLEAN)
+    other = list(CLEAN)
+    other[3] = ("calculator", {"expression": "1 + 1"}, 2.0)
+    right = make_run(other, run_id="b")
+
+    column = next(c for c in diff_runs(left, right).columns if c.left_index == 3)
+
+    assert column.op is Op.REPLACED
+    assert column.right_index == 3, "still paired -- position is information"
+    assert column.genuine
+
+
+def test_the_same_tool_with_a_new_result_is_still_changed() -> None:
+    """The other side of it: the distinction is worthless if everything is replaced."""
+    left = make_run(CLEAN)
+    other = list(CLEAN)
+    other[3] = ("fetch_page", {"url": "https://w.example/s"}, "recorded on 3 days")
+    right = make_run(other, run_id="b")
+
+    column = next(c for c in diff_runs(left, right).columns if c.left_index == 3)
+
+    assert column.op is Op.CHANGED
 
 
 def test_two_different_failures_are_not_the_same_result() -> None:

@@ -103,7 +103,8 @@ class Op(str, Enum):
 
     MATCH = "match"  # identical, to the byte
     COSMETIC = "cosmetic"  # differently phrased, same result
-    CHANGED = "changed"  # aligned, but the outcome differs
+    CHANGED = "changed"  # the same step, with a different outcome
+    REPLACED = "replaced"  # a different step entirely, in the same place
     REMOVED = "removed"  # in the left run only
     INSERTED = "inserted"  # in the right run only
 
@@ -539,7 +540,16 @@ def _rebuild(
 def _classify(left: Span, right: Span) -> Op:
     if step_signature(left) == step_signature(right):
         return Op.MATCH
-    if _label(left) == _label(right) and _same_outcome(left, right):
+    if left.kind is not right.kind or _label(left) != _label(right):
+        # Not the same step with a different result -- a different step. The
+        # alignment still pairs them, because they sit in the same place and
+        # showing that is useful, but calling it "changed" would assert a
+        # correspondence there is no evidence for. A ``fetch_page`` becoming a
+        # ``calculator`` is not that call returning something new; it is the
+        # agent doing something else. Reporting both as "changed" was the diff's
+        # last claim that outran what it knew.
+        return Op.REPLACED
+    if _same_outcome(left, right):
         return Op.COSMETIC
     return Op.CHANGED
 

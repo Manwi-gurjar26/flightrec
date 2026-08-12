@@ -231,18 +231,20 @@ def test_the_structure_metric_still_scores_something() -> None:
     assert results["insert+delete"].structure_total > 0
 
 
-def test_the_structure_metric_still_reports_a_failure() -> None:
-    """The one class it fails on has a fact of the matter, and must keep failing.
+def test_an_unmatchable_step_is_never_reported_as_a_changed_result() -> None:
+    """``adjacent-edit`` is scored over all of its cases, and must stay that way.
 
-    ``adjacent-edit`` injects a tool that appears nowhere in the other run, so
-    "nothing here corresponds" is not one of two equally good descriptions -- it
-    is the only true one. If this starts passing, either the diff learned to gap
-    unmatchable steps or the exclusion rule swallowed the last real case.
+    It injects a tool that appears nowhere in the other run, so "nothing here
+    corresponds" is the only true description rather than one of two -- which is
+    what makes it the one class the exclusion rule must never swallow. It passes
+    now because the diff says ``replaced`` rather than ``changed``: the steps
+    stay paired so their position is visible, while the report stops claiming
+    they are the same step with a new result.
     """
     adjacent = next(r for r in localization_by_kind(SEEDS) if r.kind == "adjacent-edit")
 
-    assert adjacent.structure_total > 0
-    assert adjacent.structure < 100.0
+    assert adjacent.structure_total == adjacent.total, "every case must be scoreable"
+    assert adjacent.structure == 100.0
 
 
 def test_structure_has_no_answer_for_a_duplicated_step() -> None:
