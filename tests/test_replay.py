@@ -50,11 +50,17 @@ def test_full_replay_reproduces_the_recorded_trajectory(seed: int) -> None:
     assert replay.outcome.text == recorded.text
 
 
-def test_replay_serves_every_tool_call_and_executes_none() -> None:
+def test_a_full_replay_executes_nothing_at_all() -> None:
+    """Every step, model calls included, comes out of the recording.
+
+    Serving only tool results would still reproduce the trajectory -- and would
+    re-bill every model call to get there, which is the cost the feature exists
+    to avoid.
+    """
     recorded = record(seed=0)
     replay = replay_run(recorded.run)
 
-    assert replay.served == len(tool_steps(recorded.run))
+    assert replay.served == len(recorded.run.steps())
     assert replay.live == 0
 
 
@@ -66,17 +72,20 @@ def test_tool_results_come_from_the_recording_not_from_the_tools() -> None:
     the whole feature silently absent. Tampering with the recording separates
     the two: only a replay that actually reads it can return the tampered value.
 
-    The tampered step is the calculator, the last tool call in the run. Editing
-    an earlier one changes the URL the model asks for next, which the mismatch
-    check catches first -- correct behaviour, but it tests a different thing.
+    The tampered step is the calculator, the last tool call in the run, and the
+    cut is placed on the step straight after it so the model call that consumes
+    the tampered value runs live. Tamper any earlier step and the replay
+    correctly refuses: the transcript no longer matches the recording, which is
+    a different behaviour worth testing and is tested below.
     """
     recorded = record(seed=0)
-    calculator = next(
-        s for _, s in tool_steps(recorded.run) if s.attr(GEN_AI_TOOL_NAME) == "calculator"
+    steps = recorded.run.steps()
+    calculator_at = next(
+        i for i, s in enumerate(steps) if s.attr(GEN_AI_TOOL_NAME) == "calculator"
     )
-    calculator.attributes[FR_OUTPUT] = 999.0
+    steps[calculator_at].attributes[FR_OUTPUT] = 999.0
 
-    replay = replay_run(recorded.run)
+    replay = replay_run(recorded.run, from_step=calculator_at + 1)
 
     assert replay.outcome.answer == 999
     assert recorded.answer != 999
@@ -112,14 +121,36 @@ def test_replay_keeps_the_retries_that_made_the_run_expensive() -> None:
 
 
 def test_replayed_and_served_are_recorded_as_different_claims() -> None:
-    """A re-executed model call must not be presentable as recorded data."""
-    replay = replay_run(record(seed=0).run)
+    """Every span in a replay is replayed; only pre-cut steps are *served*.
+
+    The distinction is what stops a live-executed step being presented as
+    recorded data, so it has to survive on the run that mixes both.
+    """
+    recorded = record(seed=0)
+    cut = tool_steps(recorded.run)[1][0]
+    replay = replay_run(recorded.run, from_step=cut)
 
     assert all(s.attr(FR_REPLAYED) for s in replay.run.spans)
-    served = {s.span_id for s in replay.run.spans if s.attr(FR_SERVED)}
-    tools = {s.span_id for _, s in tool_steps(replay.run)}
-    assert served == tools
-    assert not any(s.attr(FR_SERVED) for s in replay.run.steps() if s.kind is SpanKind.LLM)
+    steps = replay.run.steps()
+    assert all(s.attr(FR_SERVED) for s in steps[:cut])
+    assert not any(s.attr(FR_SERVED) for s in steps[cut:])
+
+
+def test_a_tampered_recording_is_refused_rather_than_half_served() -> None:
+    """Change a served result and the prompts downstream no longer match.
+
+    Serving the recorded model response to a prompt the recording never saw
+    would be answering a question nobody asked, and the answer would look
+    perfectly ordinary on the timeline.
+    """
+    recorded = record(seed=0)
+    calculator = next(
+        s for _, s in tool_steps(recorded.run) if s.attr(GEN_AI_TOOL_NAME) == "calculator"
+    )
+    calculator.attributes[FR_OUTPUT] = 999.0
+
+    with pytest.raises(ReplayMismatch, match="prompt"):
+        replay_run(recorded.run)
 
 
 # --- diverging on purpose -----------------------------------------------------

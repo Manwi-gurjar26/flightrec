@@ -17,8 +17,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"flightrec {__version__}")
     parser.set_defaults(func=None)
 
-    # Subcommands are registered as each build step lands:
-    #   bench   - reproduce the numbers in the README   (step 9)
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
     demo = sub.add_parser("demo", help="run the example agent and record it")
@@ -76,6 +74,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="pair step i with step i instead of aligning -- the baseline, for comparison",
     )
     diff.set_defaults(func=_cmd_diff)
+
+    bench = sub.add_parser("bench", help="reproduce every number in the README")
+    bench.add_argument("--runs", type=int, default=40, help="recordings per metric")
+    bench.add_argument("--repeats", type=int, default=40, help="timing samples for overhead")
+    bench.add_argument("--json", action="store_true", help="emit machine-readable results")
+    bench.set_defaults(func=_cmd_bench)
 
     cost = sub.add_parser("cost", help="break down a run's spend, or compare two")
     cost.add_argument("run_id")
@@ -259,16 +263,17 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
     print(f"replaying {original.run_id} -> {replay.run.run_id}")
     for index, step in enumerate(replay.run.steps()):
-        # Three distinct provenances, and conflating them would be the exact
-        # confusion this tool exists to prevent: "recorded" means the result was
-        # read back out of the recording, "re-run" means it was re-executed and
-        # is expected to match, "live" means the recording no longer applies.
-        if step.attr(FR_DIVERGENT):
-            source = "live"
-        elif step.attr(FR_SERVED):
+        # Provenance per step, and conflating these would be the exact confusion
+        # this tool exists to prevent. "recorded" was read back out of the
+        # recording and cost nothing; "live" was really executed because the
+        # recording no longer applies; "stopped" is where --strict gave up
+        # rather than guess, and is not a step that ran at all.
+        if step.attr(FR_SERVED):
             source = "recorded"
+        elif "ReplayStopped" in (step.status_message or ""):
+            source = "stopped"
         else:
-            source = "re-run"
+            source = "live"
         marker = "!" if step.status is SpanStatus.ERROR else " "
         print(f" {marker} [{index:>2}] {source:<8} {step.name:<18} {_outcome_text(step)[:56]}")
 
@@ -396,6 +401,39 @@ def _short(value: object, width: int = 24) -> str:
     # one into a replacement character.
     text = str(value if value is not None else "")
     return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    from flightrec.bench import run_bench
+
+    measurements = run_bench(runs=args.runs, repeats=args.repeats)
+
+    if args.json:
+        import json
+
+        print(json.dumps([m.as_dict() for m in measurements], indent=2))
+        return 0
+
+    print(f"flightrec bench   {args.runs} runs per metric\n")
+    for measurement in measurements:
+        print(f"{measurement.name}")
+        print(
+            f"  {measurement.format_value():>8}   vs {measurement.format_baseline():>8} "
+            f"({measurement.baseline_label})"
+        )
+        print(f"  {measurement.detail}")
+        # The caveat is not a footnote. A number whose limits are printed
+        # somewhere else is a number that will be quoted without them.
+        for line in _wrap(measurement.caveat, 74):
+            print(f"    {line}")
+        print()
+    return 0
+
+
+def _wrap(text: str, width: int) -> list[str]:
+    import textwrap
+
+    return textwrap.wrap(text, width=width) if text else []
 
 
 def _cmd_show(args: argparse.Namespace) -> int:

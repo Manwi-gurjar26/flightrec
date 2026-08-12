@@ -1,12 +1,23 @@
 """Deterministic replay: re-run a recording with every source of variation pinned.
 
-The contract is narrow on purpose. A replay serves **tool results** from the
-recording and never re-executes them, forces the recorded sampling parameters,
-and drives the run from a virtual clock and a seeded ID generator. What it does
-*not* do is serve model responses -- those are re-executed, because the whole
-point of replaying is to see what the model does when you change something.
-That only works if the model is a function of its inputs, which is exactly what
-temperature 0 buys and what the recorded temperature makes checkable.
+The contract splits at the edit point, and both halves matter.
+
+**Before it, every step is served from the recording** -- tool results *and*
+model responses. That is what makes a replay cheap: re-running the first six
+steps against a real provider to get to the seventh costs exactly what it cost
+the first time, and nobody edits step 7 twenty times if each attempt is billed
+from step 0.
+
+**After it, everything is re-executed live**, because seeing what happens next
+is the entire reason to edit a step. Re-execution only produces an answer worth
+having if the model is a function of its inputs, which is what temperature 0
+buys and what the recorded temperature makes checkable.
+
+The first version of this module served tool results only and re-executed every
+model call. It replayed *correctly* -- the trajectories matched -- and it
+silently failed the part of the promise that makes the feature worth having.
+Nothing caught that until the cost measurement in step 9 tried to show a saving
+and found none.
 
 Two fidelity claims, and they are deliberately different:
 
@@ -28,7 +39,8 @@ import hashlib
 from dataclasses import dataclass, field
 from typing import Any
 
-from flightrec.demo.agent import AgentResult, ResearchAgent
+from flightrec.demo.agent import FR_CONFABULATED, AgentResult, ResearchAgent
+from flightrec.demo.model import ModelClient, ModelResponse, ToolCall
 from flightrec.demo.tools import FaultConfig, ToolError
 from flightrec.determinism import SeededIdGenerator, VirtualClock
 from flightrec.retry import TransientError
@@ -38,7 +50,9 @@ from flightrec.spans import (
     FR_OUTPUT,
     FR_REPLAYED,
     FR_SERVED,
+    GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_TOOL_NAME,
     Run,
     Span,
@@ -74,6 +88,55 @@ _EXCEPTIONS: dict[str, type[Exception]] = {
 }
 
 
+@dataclass
+class Cutover:
+    """Shared state for the two oracles: where the recording stops applying.
+
+    Tools and model calls are served by separate objects but they are replaying
+    one interleaved sequence, so the decision to go live has to be made once for
+    both. If each kept its own idea of where the edit point was, a tool could
+    still be served from the recording after the model had already been let
+    loose -- a run half in each world, which is worse than either.
+    """
+
+    from_step: int | None = None
+    strict: bool = False
+    gone_live: bool = False
+    stopped: bool = False
+    served_models: int = 0
+    served_tools: int = 0
+    live_models: int = 0
+    live_tools: int = 0
+    mismatch: ReplayMismatch | None = None
+
+    @property
+    def served(self) -> int:
+        return self.served_models + self.served_tools
+
+    @property
+    def live(self) -> int:
+        return self.live_models + self.live_tools
+
+    def is_live(self, step_index: int) -> bool:
+        """Decide, once, whether this step and everything after it runs live."""
+        if self.gone_live:
+            return True
+        if self.from_step is None or step_index < self.from_step:
+            return False
+        if self.strict:
+            self.stopped = True
+            raise ReplayStopped(
+                f"stopped at step {step_index} (--strict): "
+                "the recording no longer describes this run"
+            )
+        self.gone_live = True
+        return True
+
+    def diverged(self, detail: str) -> ReplayMismatch:
+        self.mismatch = ReplayMismatch(detail)
+        return self.mismatch
+
+
 class RecordedTools:
     """Serves recorded tool results in order, then hands over to live execution.
 
@@ -85,62 +148,35 @@ class RecordedTools:
     retry entirely.
     """
 
-    def __init__(
-        self,
-        run: Run,
-        agent: ResearchAgent,
-        *,
-        from_step: int | None = None,
-        strict: bool = False,
-    ) -> None:
+    def __init__(self, run: Run, agent: ResearchAgent, cutover: Cutover) -> None:
         self._agent = agent
-        self._recorded: list[tuple[int, Span]] = [
-            (index, span)
-            for index, span in enumerate(run.steps())
-            if span.kind is SpanKind.TOOL
-        ]
+        self._cutover = cutover
+        self._recorded = _steps_of_kind(run, SpanKind.TOOL)
         self._cursor = 0
-        self.from_step = from_step
-        self.strict = strict
-        self.served = 0
-        self.live = 0
-        self.stopped = False
-        self.mismatch: ReplayMismatch | None = None
-
-    @property
-    def _gone_live(self) -> bool:
-        return self.live > 0
 
     def __call__(self, name: str, arguments: dict[str, Any]) -> Any:
-        if self._gone_live:
+        if self._cutover.gone_live:
             return self._live(name, arguments)
 
         if self._cursor >= len(self._recorded):
-            raise self._diverged(
+            raise self._cutover.diverged(
                 f"the replay called {name!r} but the recording has no further tool calls"
             )
 
         step_index, recorded = self._recorded[self._cursor]
-
-        if self.from_step is not None and step_index >= self.from_step:
-            if self.strict:
-                self.stopped = True
-                raise ReplayStopped(
-                    f"stopped at step {step_index} (--strict): "
-                    "the recording no longer describes this run"
-                )
+        if self._cutover.is_live(step_index):
             return self._live(name, arguments)
 
         recorded_name = recorded.attr(GEN_AI_TOOL_NAME) or recorded.name
         recorded_args = recorded.attr(FR_INPUT)
         if recorded_name != name or recorded_args != arguments:
-            raise self._diverged(
+            raise self._cutover.diverged(
                 f"step {step_index}: recorded {recorded_name}({recorded_args!r}) "
                 f"but the replay asked for {name}({arguments!r})"
             )
 
         self._cursor += 1
-        self.served += 1
+        self._cutover.served_tools += 1
         return self._serve(recorded)
 
     # -- the two paths --------------------------------------------------------
@@ -164,12 +200,87 @@ class RecordedTools:
         return recorded.attr(FR_OUTPUT)
 
     def _live(self, name: str, arguments: dict[str, Any]) -> Any:
-        self.live += 1
+        self._cutover.live_tools += 1
         return self._agent.invoke_live(name, arguments, Tracer.current_span())
 
-    def _diverged(self, detail: str) -> ReplayMismatch:
-        self.mismatch = ReplayMismatch(detail)
-        return self.mismatch
+
+class RecordedModel:
+    """Serves recorded model responses before the edit point, live ones after.
+
+    This is where the cost saving lives. A served response bills nothing, so
+    replaying from step 7 costs seven steps less than re-running the task --
+    which is the difference between iterating on a prompt and budgeting for it.
+    """
+
+    def __init__(self, run: Run, live: ModelClient, cutover: Cutover) -> None:
+        self._live = live
+        self._cutover = cutover
+        self._recorded = _steps_of_kind(run, SpanKind.LLM)
+        self._cursor = 0
+
+    @property
+    def name(self) -> str:
+        return getattr(self._live, "name", "unknown")
+
+    def complete(
+        self, messages: list[dict[str, Any]], temperature: float = 0.0
+    ) -> ModelResponse:
+        if self._cutover.gone_live:
+            return self._complete_live(messages, temperature)
+
+        if self._cursor >= len(self._recorded):
+            raise self._cutover.diverged(
+                "the replay asked for another model call but the recording has none"
+            )
+
+        step_index, recorded = self._recorded[self._cursor]
+        if self._cutover.is_live(step_index):
+            return self._complete_live(messages, temperature)
+
+        # The transcript is what the model is a function of, so a disagreement
+        # here means the replay has drifted and every response served from this
+        # point on would be answering a question that was never asked.
+        prompt = messages[-1].get("content") if messages else None
+        if stable_key(recorded.attr(FR_INPUT)) != stable_key(prompt):
+            raise self._cutover.diverged(
+                f"step {step_index}: the recorded prompt and the replayed prompt differ"
+            )
+
+        self._cursor += 1
+        self._cutover.served_models += 1
+        span = Tracer.current_span()
+        if span is not None:
+            span.attributes[FR_SERVED] = True
+        return _recorded_response(recorded)
+
+    def _complete_live(
+        self, messages: list[dict[str, Any]], temperature: float
+    ) -> ModelResponse:
+        self._cutover.live_models += 1
+        return self._live.complete(messages, temperature=temperature)
+
+
+def _steps_of_kind(run: Run, kind: SpanKind) -> list[tuple[int, Span]]:
+    """Steps of one kind, tagged with their index in the *whole* step sequence.
+
+    The index has to be global: the edit point a user names is a step number on
+    the timeline, not the third tool call.
+    """
+    return [(i, s) for i, s in enumerate(run.steps()) if s.kind is kind]
+
+
+def _recorded_response(span: Span) -> ModelResponse:
+    call = span.attr("flightrec.tool_call")
+    reasons = span.attr(GEN_AI_RESPONSE_FINISH_REASONS) or ["stop"]
+    return ModelResponse(
+        text=str(span.attr(FR_OUTPUT) or ""),
+        tool_call=ToolCall(str(call["name"]), dict(call["arguments"])) if call else None,
+        input_tokens=span.input_tokens,
+        output_tokens=span.output_tokens,
+        finish_reason=str(reasons[0]),
+        model=str(span.attr(GEN_AI_REQUEST_MODEL) or "unknown"),
+        confabulated=bool(span.attr(FR_CONFABULATED)),
+    )
 
 
 def _reconstruct(span: Span) -> Exception:
@@ -245,15 +356,16 @@ def replay_run(
         id_generator=SeededIdGenerator(_identity(run, from_step, strict, edits)),
         max_steps=int(root.attr("flightrec.max_steps", 12) or 12) if root else 12,
     )
-    oracle = RecordedTools(run, agent, from_step=from_step, strict=strict)
-    agent.tool_override = oracle
+    cutover = Cutover(from_step=from_step, strict=strict)
+    agent.tool_override = RecordedTools(run, agent, cutover)
+    agent.model = RecordedModel(run, agent.model, cutover)
 
     outcome = agent.run(task if task is not None else (recorded_task or ""))
 
     # The agent catches its own exceptions -- that is the behaviour under test --
     # so a mismatch would otherwise end up as a string in ``outcome.error``.
-    if oracle.mismatch is not None:
-        raise oracle.mismatch
+    if cutover.mismatch is not None:
+        raise cutover.mismatch
 
     _mark(outcome.run, from_step)
     return ReplayResult(
@@ -262,9 +374,9 @@ def replay_run(
         outcome=outcome,
         from_step=from_step,
         strict=strict,
-        served=oracle.served,
-        live=oracle.live,
-        stopped=oracle.stopped,
+        served=cutover.served,
+        live=cutover.live,
+        stopped=cutover.stopped,
         edits=edits,
     )
 

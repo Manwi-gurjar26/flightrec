@@ -7,13 +7,17 @@ deterministically from any step, and diff two runs to find exactly where they di
 
 > ### The number
 >
-> **Replay reproduces the recorded step sequence 100% of the time at temperature 0 — up from 0% before pinning tool results, timestamps and retry jitter.**
+> **Replay reproduces the recorded step sequence in 40 runs out of 40. Re-running
+> the same task without the recording reproduces it in 8 of 40.**
 >
-> *Status: not yet measured. This README was written before the code, deliberately.
-> Every number below is a **target with a defined measurement procedure** (see
-> [Measurement](#measurement)). Each one is replaced with a measured value, or an
-> honest worse one, when step 9 of the build lands. Nothing here is quoted on a
-> resume until it comes out of `flightrec bench`.*
+> *Status: measured. `flightrec bench` produces this and every other number
+> below, in about a minute, with no API key and no network.*
+>
+> *This README was written before the code, deliberately, with each number as a
+> target and a defined measurement procedure. Two targets were met, one had no
+> target to meet, and one was missed by a factor of about twenty — see
+> [Measurement](#measurement), where the miss is written up rather than quietly
+> dropped.*
 
 ---
 
@@ -64,6 +68,8 @@ flightrec replay <run_id> --from-step 4 --strict   # stop there instead
 
 flightrec diff <run_a> <run_b>              # align them, find the divergence
 flightrec diff <run_a> <run_b> --by-index   # the naive pairing, for comparison
+
+flightrec bench                             # reproduce every number below
 ```
 
 The UI is server-rendered Jinja2 with **no JavaScript and no external requests** —
@@ -73,9 +79,12 @@ browser primitive.
 
 ## Why this was hard
 
-*(The three sections below are the point of the project. They get filled in with what
-actually happened — what was tried first, why it failed, what replaced it — as each piece
-lands. Placeholders are marked TODO and are not allowed to survive to v1.0.)*
+*(The three sections below are the point of the project: what was tried first, why
+it failed, what replaced it. They are written after the fact and they are not a
+success story — three of the bugs recorded here were found by measuring something
+the tests already said was fine. One TODO survives, at the end of section 3,
+because closing it honestly needs work that has not been done rather than a
+paragraph saying it has.)*
 
 ### 1. Deterministic replay: every source of variation has to be pinned
 
@@ -168,12 +177,23 @@ and the timeline shows which is which:
 
 | Label | Meaning |
 |---|---|
-| `recorded` | the tool result was read back out of the recording |
-| `re-run` | re-executed, and expected to match — every model call, always |
-| `live` | past the edit point; the recording no longer applies |
+| `recorded` | read back out of the recording, and billed nothing |
+| `live` | past the edit point; really executed, because the recording no longer applies |
+| `stopped` | where `--strict` gave up rather than guess — not a step that ran |
 
-TODO: the cost implications of forward re-execution, measured rather than
-asserted, in step 9.
+**What the cost measurement then found, which changed the design.** The first
+implementation served tool results from the recording and re-executed every
+model call. It replayed *correctly* — trajectories matched, every test passed —
+and it quietly failed the part of the promise that makes the feature worth
+having: "without paying for the first six steps again". Re-executing the model
+calls means paying for them. Nothing caught it until step 9 tried to measure a
+saving and found none, because a replay that is faithful and expensive looks
+exactly like a replay that is faithful and cheap from the outside.
+
+Steps before the edit point now serve model responses too, and the served
+response is checked against the prompt the replay actually produced — serving a
+recorded answer to a question that was never asked would be the same silent
+class of bug one level down.
 
 ### 3. Run diffing is sequence alignment, not `zip()`
 
@@ -209,21 +229,35 @@ the winner comes down to evaluation order. Affine makes "one event produced one
 block" the principled answer rather than the lucky one. That is worth having,
 and it is a smaller claim than "linear shreds retry blocks".
 
-**Known limitation, and it is the honest headline for this section: the demo
-corpus cannot demonstrate any of this.** All 40 seeds produce trajectories of
-exactly 11 steps, because the demo agent's policy is fixed — search, fetch,
-search, fetch, calculate, answer. Faults change *what* each step returns, never
-*how many* there are. With no length difference, alignment and `zip()` produce
-identical output, which is why `flightrec diff --by-index` on two demo runs
-looks the same as without it. The alignment is exercised by constructed cases in
-`tests/test_diff.py` and would matter for any agent that retries, backtracks or
-loops a variable number of times. Making the measurement in step 9 mean
-anything requires a corpus whose runs differ in length; that is a change to the
-demo agent, and it is step 9's first problem rather than something to paper over
-here.
+**The corpus could not demonstrate any of this until the agent was changed to
+allow it.** Every one of the 40 seeds originally produced a trajectory of
+exactly 11 steps, because the demo agent's policy was fixed — search, fetch,
+search, fetch, calculate, answer. Faults changed *what* each step returned,
+never *how many* there were. With no length difference, alignment and `zip()`
+produce identical output, so the diff's entire reason for existing was
+untestable against real recordings and the "alignment ≫ zip" claim would have
+measured as "alignment == zip".
 
-TODO: the cases where alignment still gets it wrong, once it has run against a
-corpus that can produce them.
+The fix was to give the agent something real agents do: when a guessed URL 404s,
+it tries a second scheme before giving up. Runs are now 11, 13 or 15 steps
+depending on how many searches came back empty. Both guesses are wrong on
+purpose — letting the second one succeed would have been a nicer story and would
+have deleted the demo's most important failure, an empty search leading to
+invented data.
+
+That is what the divergence-localization measurement runs against: a real
+recorded recovery block spliced into a copy of a run, plus one later step's
+output changed. Alignment pairs the changed step with its counterpart in 40 of
+40 mutants; index pairing manages 0, because the insertion shifts everything
+after it. Note what the baseline does there — it *does* report a difference at
+the right index, about the wrong step. Scoring "reported something at index k"
+would have handed it a pass for being confidently wrong, which is the failure
+mode this project is about.
+
+TODO: the cases where alignment still gets it wrong. None have been found, which
+most likely means the mutation generator is not yet adversarial enough — it
+injects one insertion and one change, never a reordering, a substitution of one
+tool for another, or two divergences in a row.
 
 ## Architecture
 
@@ -256,14 +290,53 @@ pytest
 ## Measurement
 
 Every number in this README comes from `flightrec bench`, which is committed and
-reproducible. No number is reported without a baseline to compare it against.
+reproducible. No number is reported without a baseline to compare it against, and
+none is reported without its limits.
 
-| Metric | How it is measured | Baseline | Target |
-|---|---|---|---|
-| **Replay fidelity** | Fraction of N recorded runs whose replayed step sequence is identical to the recording, at temperature 0 | Same measurement with pinning disabled | 100% vs. ~0% |
-| **Divergence localization** | Of M runs with a synthetically injected divergence at a known step, the fraction where diff reports that exact step | Index-by-index `zip()` pairing | alignment ≫ zip |
-| **Replay cost saving** | Provider tokens spent replaying from step N vs. re-running from step 0 | Full re-run | — |
-| **Overhead** | Wall-clock and token overhead the SDK adds to an uninstrumented run | Uninstrumented agent | < 5% wall clock |
+```bash
+flightrec bench                 # ~1 minute, 40 runs per metric
+flightrec bench --json          # machine-readable
+```
+
+| Metric | Measured | Baseline | Target | |
+|---|---|---|---|---|
+| **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
+| **Divergence localization** | **100%** (40/40) | 0% — index-by-index `zip()` pairing | alignment ≫ zip | met |
+| **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
+| **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
+
+The first three are exact and reproduce on any machine — they are counts, and the
+seeds are fixed. The overhead row is a timing measurement and moves by a few
+percent between runs and considerably more between machines; it is quoted with a
+`~` for that reason rather than to round it in a flattering direction.
+
+Four things these numbers do not say, in descending order of how much they matter:
+
+**The overhead target was missed by a factor of about twenty, and the percentage
+is the wrong number to read.** Every step of the demo agent is local and finishes
+in microseconds, so a fixed per-span cost lands on a run that does almost nothing
+— roughly 0.2ms instrumented against 0.1ms bare. The portable figure is ~8µs per
+span, which stays under the 5% target for any run longer than about 2ms. One real
+model call is three orders of magnitude past that. The percentage is reported
+anyway because it is what the target asked for, and moving the goalposts after
+seeing the result is how benchmarks become press releases.
+
+**The replay saving is smaller than "skip half the steps" suggests, for a
+structural reason.** A model call's prompt carries the whole transcript so far,
+so the second half of a run costs far more than the first. Cutting at the
+midpoint skips half the steps and a quarter of the tokens. The saving scales with
+*where* you cut, not how many steps you skip — hence both numbers in the table.
+
+**Replay fidelity is trajectory-identical, not byte-identical.** Span IDs and
+timestamps are excluded from the comparison because a replay cannot recover the
+recording's UUIDs or its wall clock. Replays of one recording *are* byte-identical
+to each other; that is tested separately.
+
+**The fidelity baseline is generous to the no-tooling case.** It re-runs the task
+with fresh RNG streams — "run it again and watch". It scores 20% rather than 0%
+because a quarter of runs happen to fire no faults and land on the same clean
+trajectory. Against a real provider, which offers no seed at all, the baseline
+would be worse than this rather than better.
 
 The demo agent used for all measurements is committed (`examples/research_agent.py`) and
 runs against a deterministic stub model by default, so anyone can reproduce these numbers
@@ -279,7 +352,7 @@ without an API key.
 - [x] 6. Token / cost rollups
 - [x] 7. Deterministic replay
 - [x] 8. Run diff with sequence alignment
-- [ ] 9. Measurement harness → real numbers in this README
+- [x] 9. Measurement harness → real numbers in this README
 
 ## What I would do with two more weeks
 

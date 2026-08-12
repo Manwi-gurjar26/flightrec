@@ -64,14 +64,27 @@ class ModelClient(Protocol):
     ) -> ModelResponse: ...
 
 
+#: How many URLs the model will try for one city before giving up on it.
+#:
+#: This is what makes trajectories vary in length, and it is the whole reason
+#: the diff needs sequence alignment rather than ``zip()``. With a fixed policy
+#: every run is the same length, index-by-index pairing works by accident, and
+#: the alignment cannot be shown to earn its complexity -- which is exactly the
+#: state this corpus was in until it was measured.
+MAX_FETCH_ATTEMPTS = 2
+
+
 @dataclass
 class _Progress:
     """What the model can infer about each city from the transcript so far."""
 
     searched: dict[str, list[str] | None] = field(default_factory=dict)
     fetched: dict[str, str] = field(default_factory=dict)
-    fetch_failed: set[str] = field(default_factory=set)
+    fetch_attempts: dict[str, list[str]] = field(default_factory=dict)
     calculated: float | None = None
+
+    def attempts(self, city: str) -> list[str]:
+        return self.fetch_attempts.get(city, [])
 
 
 class StubModel:
@@ -110,13 +123,13 @@ class StubModel:
                 if city:
                     progress.searched[city] = list(content) if ok and content else []
             elif name == "fetch_page":
-                city = _city_of(str(args.get("url", "")))
+                url = str(args.get("url", ""))
+                city = _city_of(url)
                 if not city:
                     continue
+                progress.fetch_attempts.setdefault(city, []).append(url)
                 if ok:
                     progress.fetched[city] = str(content)
-                else:
-                    progress.fetch_failed.add(city)
             elif name == "calculator" and ok:
                 progress.calculated = float(content)
         return progress
@@ -133,27 +146,45 @@ class StubModel:
                     ),
                 )
 
+            if city in progress.fetched:
+                continue
+
+            attempts = progress.attempts(city)
+            if len(attempts) >= MAX_FETCH_ATTEMPTS:
+                continue  # out of ideas for this city; it will get invented later
+
             results = progress.searched[city] or []
-            already_tried = city in progress.fetched or city in progress.fetch_failed
-            if not already_tried:
+            candidates = [u for u in _candidate_urls(city, results) if u not in attempts]
+            if not candidates:
+                continue
+
+            if not attempts:
                 if results:
-                    url = results[0]
-                else:
-                    # The recovery. Search came back empty, so the model guesses
-                    # a URL that looks right and is not. It does not flag any
-                    # uncertainty, because models generally do not.
-                    url = f"https://weather.example/{city}-climate"
                     return ModelResponse(
-                        text=(
-                            f"Search returned nothing for {city.title()}. "
-                            f"The site's URL scheme is predictable, so I'll go direct."
-                        ),
-                        tool_call=ToolCall("fetch_page", {"url": url}),
+                        text=f"Found a source for {city.title()}. Fetching it.",
+                        tool_call=ToolCall("fetch_page", {"url": candidates[0]}),
                     )
+                # The recovery. Search came back empty, so the model guesses a
+                # URL that looks right and is not. It does not flag any
+                # uncertainty, because models generally do not.
                 return ModelResponse(
-                    text=f"Found a source for {city.title()}. Fetching it.",
-                    tool_call=ToolCall("fetch_page", {"url": url}),
+                    text=(
+                        f"Search returned nothing for {city.title()}. "
+                        f"The site's URL scheme is predictable, so I'll go direct."
+                    ),
+                    tool_call=ToolCall("fetch_page", {"url": candidates[0]}),
                 )
+
+            # The second guess. Same confidence, same absence of doubt, two more
+            # steps on the bill -- and it is where a run stops being the same
+            # length as its neighbours.
+            return ModelResponse(
+                text=(
+                    f"That URL 404'd for {city.title()}. This site uses a couple of "
+                    f"different schemes; trying the other one."
+                ),
+                tool_call=ToolCall("fetch_page", {"url": candidates[0]}),
+            )
 
         numbers, confabulated = self._numbers(progress)
 
@@ -209,6 +240,21 @@ class StubModel:
                 ]
             )
         return default
+
+
+def _candidate_urls(city: str, results: list[str]) -> list[str]:
+    """URLs the model will try for a city, best first.
+
+    The two guesses are both plausible and both wrong. Letting the second one
+    succeed would be a nicer story and would delete the demo's most important
+    failure: an empty search leading to invented data. So the recovery costs two
+    extra steps and still ends in a confabulation, which is what guessing at a
+    site's URL scheme usually gets you.
+    """
+    return list(results) + [
+        f"https://weather.example/{city}-climate",
+        f"https://weather.example/{city}-annual",
+    ]
 
 
 def _city_of(text: str) -> str | None:

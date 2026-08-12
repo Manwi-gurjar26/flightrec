@@ -8,12 +8,12 @@ in the README is noise.
 import pytest
 
 from flightrec.demo.agent import FR_CONFABULATED, ResearchAgent, run_agent
-from flightrec.demo.model import FABRICATED_PRIOR, StubModel
+from flightrec.demo.model import CITIES, FABRICATED_PRIOR, StubModel
 from flightrec.demo.tools import GROUND_TRUTH, Fault, FaultConfig, Toolbox, ToolError
 from flightrec.determinism import SeededIdGenerator, VirtualClock
 from flightrec.retry import TransientError, make_rng
 from flightrec.sinks import MemorySink
-from flightrec.spans import SpanKind, SpanStatus
+from flightrec.spans import FR_INPUT, SpanKind, SpanStatus
 
 CLEAN = FaultConfig()
 ALWAYS_EMPTY = FaultConfig(empty_search_rate=1.0)
@@ -207,6 +207,38 @@ def test_empty_search_makes_the_agent_invent_a_recovery():
     # ...and the exact step where it stopped being grounded is marked.
     confabulated = [s for s in result.run.spans if s.attr(FR_CONFABULATED)]
     assert confabulated, "the ungrounded step must be identifiable"
+
+
+def test_the_agent_tries_a_second_url_before_giving_up():
+    """Two guesses, both wrong, and the give-up is what makes runs differ in length."""
+    result = pinned_agent(seed=2, faults=ALWAYS_EMPTY).run()
+
+    attempted = [
+        s.attr(FR_INPUT)["url"]
+        for s in result.run.steps()
+        if s.name == "tool.fetch_page"
+    ]
+
+    assert len(attempted) == 2 * len(CITIES)
+    assert len(set(attempted)) == len(attempted), "a retry of the same URL is not a recovery"
+    assert result.confabulated, "the second guess must not rescue the run"
+
+
+def test_trajectory_length_varies_across_the_corpus():
+    """The property the diff measurement depends on, asserted so it cannot regress.
+
+    Until the agent could give up on a city, every seed produced an 11-step run.
+    With every run the same length, index-by-index pairing is accidentally
+    correct and the sequence alignment cannot be shown to be worth anything --
+    so a fixed-length corpus silently invalidates the divergence-localization
+    number in the README.
+    """
+    lengths = {
+        len(ResearchAgent(seed=seed, faults=FaultConfig.realistic()).run().run.steps())
+        for seed in range(40)
+    }
+
+    assert len(lengths) >= 3, f"corpus is too uniform to exercise alignment: {lengths}"
 
 
 def test_flaky_fetch_retries_and_still_succeeds():
