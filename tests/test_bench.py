@@ -15,8 +15,9 @@ import random
 import pytest
 
 from flightrec.bench import (
-    Mutation,
+    MUTATORS,
     NoOpTracer,
+    localization_by_kind,
     measure_divergence_localization,
     measure_overhead,
     measure_replay_cost_saving,
@@ -47,8 +48,39 @@ def test_replay_fidelity_is_total_and_the_baseline_is_not() -> None:
 def test_divergence_localization_beats_index_pairing() -> None:
     result = measure_divergence_localization(SEEDS)
 
-    assert result.value == 100.0
-    assert result.baseline == 0.0
+    assert result.value > result.baseline
+    assert result.breakdown, "the per-class lines are the point; the average hides them"
+
+
+def test_the_mutation_classes_are_not_all_easy() -> None:
+    """A benchmark every arm passes is a benchmark that is not measuring.
+
+    Two classes are here specifically because index pairing handles them fine --
+    they keep the comparison honest. At least one has to defeat the alignment,
+    or the generator is still too gentle to have found anything.
+    """
+    results = {r.kind: r for r in localization_by_kind(SEEDS)}
+
+    assert results["double-change"].rate(results["double-change"].naive) == 100.0
+    assert results["reorder"].rate(results["reorder"].aligned) < 100.0
+
+
+def test_reordering_defeats_the_alignment_because_it_is_monotonic() -> None:
+    """The known structural limit, pinned so it cannot be silently "fixed".
+
+    Needleman-Wunsch produces a monotonic correspondence: step order is
+    preserved on both sides. A reordering is by definition non-monotonic, so no
+    amount of penalty tuning represents one -- it comes out as a gap in one
+    place and a gap in the other. If this test starts failing, either the
+    aligner is no longer monotonic or the mutation stopped reordering anything.
+    """
+    reorder = next(r for r in localization_by_kind(SEEDS) if r.kind == "reorder")
+
+    assert reorder.total > 0
+    assert reorder.rate(reorder.aligned) < 100.0
+    assert reorder.aligned_pairing < 100.0
+    # Still better than index pairing, which handles it no better and shifts too.
+    assert reorder.rate(reorder.aligned) > reorder.rate(reorder.naive)
 
 
 def test_replay_saves_tokens_against_re_running() -> None:
@@ -86,31 +118,40 @@ def test_the_benchmark_is_reproducible() -> None:
 # --- the mutation, which the localization number depends on -------------------
 
 
-def test_a_mutant_differs_from_its_original_in_exactly_two_ways() -> None:
+def test_an_insertion_mutant_differs_in_exactly_two_ways() -> None:
     """One insertion and one changed output -- no accidental third difference.
 
     If mutation introduced anything else, the localization score would be
     measuring the aligner against a problem nobody characterised.
     """
-    mutation = mutate(record(0), recovery_block(), random.Random(1))
+    mutation = mutate(record(0), recovery_block(), random.Random(1), kind="insert")
     assert mutation is not None
 
     diff = diff_runs(mutation.original, mutation.mutant)
-    gaps = diff.count(Op.INSERTED) + diff.count(Op.REMOVED)
 
-    assert gaps == mutation.offset
-    assert diff.count(Op.CHANGED) == 1
-    assert len(mutation.mutant.steps()) == len(mutation.original.steps()) + mutation.offset
+    assert diff.count(Op.INSERTED) == 2
+    assert diff.count(Op.REMOVED) == 0
+    assert diff.count(Op.CHANGED) == len(mutation.changed) == 1
+    assert len(mutation.mutant.steps()) == len(mutation.original.steps()) + 2
 
 
-def test_the_injected_change_is_where_the_mutation_says_it_is() -> None:
-    mutation = mutate(record(3), recovery_block(), random.Random(2))
+@pytest.mark.parametrize("kind", list(MUTATORS))
+def test_every_mutation_records_a_usable_ground_truth(kind: str) -> None:
+    """The scoring is only as trustworthy as the correspondence it scores against."""
+    mutation = mutate(record(0), recovery_block(), random.Random(4), kind=kind)
     assert mutation is not None
 
-    original = mutation.original.steps()[mutation.changed_step]
-    changed = mutation.mutant.steps()[mutation.counterpart]
-
-    assert original.attr(FR_OUTPUT) != changed.attr(FR_OUTPUT)
+    assert mutation.changed <= set(mutation.expected), "a changed step must survive"
+    assert set(mutation.expected) | mutation.removed == set(
+        range(len(mutation.original.steps()))
+    )
+    assert len(set(mutation.expected.values())) == len(mutation.expected), (
+        "two original steps cannot map to one mutant step"
+    )
+    for step in mutation.changed:
+        before = mutation.original.steps()[step]
+        after = mutation.mutant.steps()[mutation.expected[step]]
+        assert before.attr(FR_OUTPUT) != after.attr(FR_OUTPUT)
 
 
 def test_index_pairing_really_does_miss_the_injected_step() -> None:
@@ -120,14 +161,24 @@ def test_index_pairing_really_does_miss_the_injected_step() -> None:
     different step -- so it reports a difference, at the right index, about the
     wrong thing.
     """
-    mutation = mutate(record(0), recovery_block(), random.Random(3))
+    mutation = mutate(record(0), recovery_block(), random.Random(3), kind="insert")
     assert mutation is not None
+    changed = next(iter(mutation.changed))
 
     naive = diff_runs_by_index(mutation.original, mutation.mutant)
-    column = next(c for c in naive.columns if c.left_index == mutation.changed_step)
+    column = next(c for c in naive.columns if c.left_index == changed)
 
-    assert column.right_index == mutation.changed_step
-    assert column.right_index != mutation.counterpart
+    assert column.right_index == changed
+    assert column.right_index != mutation.expected[changed]
+
+
+def test_a_deletion_mutant_makes_the_mutant_shorter() -> None:
+    """The shift has to be able to go the other way, or only one case is tested."""
+    mutation = mutate(record(0), recovery_block(), random.Random(5), kind="delete")
+    assert mutation is not None
+
+    assert len(mutation.mutant.steps()) == len(mutation.original.steps()) - 2
+    assert len(mutation.removed) == 2
 
 
 def test_the_recovery_block_is_real_recorded_steps() -> None:

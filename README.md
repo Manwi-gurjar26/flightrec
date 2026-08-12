@@ -14,10 +14,11 @@ deterministically from any step, and diff two runs to find exactly where they di
 > below, in about a minute, with no API key and no network.*
 >
 > *This README was written before the code, deliberately, with each number as a
-> target and a defined measurement procedure. Two targets were met, one had no
-> target to meet, and one was missed by a factor of about twenty — see
-> [Measurement](#measurement), where the miss is written up rather than quietly
-> dropped.*
+> target and a defined measurement procedure. One target was met outright, one
+> was met with two documented failures the benchmark had to be made harsher to
+> find, one had no target, and one was missed by a factor of about twenty — see
+> [Measurement](#measurement), where the misses are written up rather than
+> quietly dropped.*
 
 ---
 
@@ -81,10 +82,9 @@ browser primitive.
 
 *(The three sections below are the point of the project: what was tried first, why
 it failed, what replaced it. They are written after the fact and they are not a
-success story — three of the bugs recorded here were found by measuring something
-the tests already said was fine. One TODO survives, at the end of section 3,
-because closing it honestly needs work that has not been done rather than a
-paragraph saying it has.)*
+success story — several of the bugs recorded here were found by measuring
+something the tests already said was fine, and section 3 ends with two failures
+that are still failures.)*
 
 ### 1. Deterministic replay: every source of variation has to be pinned
 
@@ -254,10 +254,44 @@ the right index, about the wrong step. Scoring "reported something at index k"
 would have handed it a pass for being confidently wrong, which is the failure
 mode this project is about.
 
-TODO: the cases where alignment still gets it wrong. None have been found, which
-most likely means the mutation generator is not yet adversarial enough — it
-injects one insertion and one change, never a reordering, a substitution of one
-tool for another, or two divergences in a row.
+### Where the alignment gets it wrong
+
+The first version of that benchmark scored 100%, which was a fact about the
+benchmark rather than about the aligner: it only ever injected one insertion and
+one changed result. Six mutation classes now run separately — insertion,
+deletion, insertion *and* deletion, two changes at once, reordering, and one
+tool substituted for another — and they are scored separately, because an
+average over classes hides a total failure behind five easy passes.
+
+Two of them break it.
+
+**1. Reordering, which no amount of tuning will fix.** Needleman–Wunsch produces
+a *monotonic* correspondence: step order is preserved on both sides. A
+reordering is by definition non-monotonic, so it cannot be represented at all —
+it comes out as a gap in one place and a gap in the other, and the two halves of
+the moved block are never paired with each other. Localization drops to 72%, and
+every one of the failures involves a step whose correspondence crosses another's;
+the cases that pass are the ones where the changed step happened to sit outside
+the moved region. Fixing this properly means abandoning a global alignment for
+something that can express a transposition. It is not a penalty-tuning problem
+and is not written up here as one.
+
+**2. An insertion and a deletion that cancel out in length, which is the more
+embarrassing one.** Two steps added and two removed leaves the run the same
+length. The aligner then discovers that pairing every step positionally costs a
+handful of substitutions, while representing the truth costs two gap blocks at
+−1.45 each — so it takes the cheap option and **degenerates into exactly the
+index-by-index pairing this whole module exists to beat**. On the failing cases
+the diff contains no gaps at all: five matches, six changes, every step paired
+with its positional neighbour.
+
+The second one is worth dwelling on, because localization still scores 100% for
+that class. The changed step is chosen after the deletion, where the net offset
+is back to zero, so the headline metric is satisfied by an alignment that is
+wrong about nine steps out of eleven. That is why the benchmark reports a second,
+harsher number — the fraction of *all* surviving steps paired with their true
+counterpart — alongside it. Localization says 100%; pairing says 91.9%, and the
+gap between those two numbers is the part that would have shipped unnoticed.
 
 ## Architecture
 
@@ -301,7 +335,7 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **100%** (40/40) | 0% — index-by-index `zip()` pairing | alignment ≫ zip | met |
+| **Divergence localization** | **95%** over 6 mutation classes — 100% for insertions and deletions, 72% for reorderings | 55% — index-by-index `zip()` pairing | alignment ≫ zip | met, with two known failures |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -310,7 +344,16 @@ seeds are fixed. The overhead row is a timing measurement and moves by a few
 percent between runs and considerably more between machines; it is quoted with a
 `~` for that reason rather than to round it in a flattering direction.
 
-Four things these numbers do not say, in descending order of how much they matter:
+Five things these numbers do not say, in descending order of how much they matter:
+
+**The 55% baseline is not a fair fight in either direction, and neither is the
+95%.** Three of the six mutation classes change no lengths at all, and on those
+index pairing is *correct* — it scores 100%, which drags the baseline up from the
+0% it scores on insertions and deletions. Conversely the alignment's 95% is
+dragged down by reorderings, which it cannot represent in principle. The per-class
+lines in `flightrec bench` are the honest view; the single number exists because
+the table asked for one. [Where the alignment gets it
+wrong](#where-the-alignment-gets-it-wrong) has the two failures in full.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

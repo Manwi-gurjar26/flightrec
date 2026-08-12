@@ -422,6 +422,8 @@ def _cmd_bench(args: argparse.Namespace) -> int:
             f"({measurement.baseline_label})"
         )
         print(f"  {measurement.detail}")
+        for line in measurement.breakdown:
+            print(f"    {line}")
         # The caveat is not a footnote. A number whose limits are printed
         # somewhere else is a number that will be quoted without them.
         for line in _wrap(measurement.caveat, 74):

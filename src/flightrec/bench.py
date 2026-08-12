@@ -14,7 +14,7 @@ from __future__ import annotations
 import random
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import median
 from typing import Any, Iterator
 
@@ -47,6 +47,7 @@ class Measurement:
     baseline: float | None = None
     baseline_label: str = ""
     detail: str = ""
+    breakdown: list[str] = field(default_factory=list)
     caveat: str = ""
 
     def format_value(self) -> str:
@@ -63,6 +64,7 @@ class Measurement:
             "baseline": self.baseline,
             "baseline_label": self.baseline_label,
             "detail": self.detail,
+            "breakdown": self.breakdown,
             "caveat": self.caveat,
         }
 
@@ -132,72 +134,157 @@ def measure_replay_fidelity(seeds: range) -> Measurement:
 # --- 2. divergence localization ----------------------------------------------
 
 
+@dataclass
+class KindResult:
+    """How both pairings did against one class of mutation."""
+
+    kind: str
+    total: int = 0
+    aligned: int = 0
+    naive: int = 0
+    aligned_pairing: float = 0.0
+    naive_pairing: float = 0.0
+
+    def rate(self, hits: int) -> float:
+        return 100.0 * hits / self.total if self.total else 0.0
+
+    def line(self) -> str:
+        return (
+            f"{self.kind:<14} localized {self.rate(self.aligned):5.1f}% "
+            f"(zip {self.rate(self.naive):5.1f}%)   "
+            f"pairing {self.aligned_pairing:5.1f}% (zip {self.naive_pairing:5.1f}%)"
+        )
+
+
+def localization_by_kind(seeds: range) -> list[KindResult]:
+    """Score both pairings against every class of mutation, separately.
+
+    Separately, because an average over mutation classes is a number that can
+    hide a total failure behind five easy passes -- and the failure is the part
+    worth knowing about.
+    """
+    block = recovery_block()
+    results = []
+
+    for kind in MUTATORS:
+        # One RNG per kind, seeded identically, so adding a mutation class does
+        # not shift the mutants every other class gets.
+        rng = random.Random(20240812)
+        result = KindResult(kind=kind)
+        aligned_pairing, naive_pairing = 0.0, 0.0
+
+        for seed in seeds:
+            mutation = mutate(record(seed), block, rng, kind=kind)
+            if mutation is None:
+                continue
+            result.total += 1
+            aligned = diff_runs(mutation.original, mutation.mutant)
+            naive = diff_runs_by_index(mutation.original, mutation.mutant)
+
+            result.aligned += int(mutation.localized_by(aligned))
+            result.naive += int(mutation.localized_by(naive))
+            aligned_pairing += mutation.pairing_accuracy(aligned)
+            naive_pairing += mutation.pairing_accuracy(naive)
+
+        if result.total:
+            result.aligned_pairing = 100.0 * aligned_pairing / result.total
+            result.naive_pairing = 100.0 * naive_pairing / result.total
+        results.append(result)
+
+    return results
+
+
 def measure_divergence_localization(seeds: range) -> Measurement:
     """Given a known injected change, does the diff pair the right two steps?
 
-    Each mutant gets two edits: a real two-step recovery block spliced in, and
-    one later step's output changed. The insertion is what makes this hard --
-    it shifts every following step, so index-by-index pairing compares the
-    changed step against somebody else's.
+    Every mutant carries a structural edit and at least one changed tool result.
+    The structural edit is what makes this hard: it shifts the steps after it,
+    so index-by-index pairing compares the changed step against somebody else's.
 
     Measured as *pairing*, not as "reported a difference at index k". Naive
     pairing also reports a difference at index k -- it reports one nearly
-    everywhere after the insertion -- so scoring that would hand it a pass for
+    everywhere after an insertion -- so scoring that would hand it a pass for
     being wrong in the right place.
     """
-    block = recovery_block()
-    rng = random.Random(20240812)
-    aligned_hits = naive_hits = total = 0
-
-    for seed in seeds:
-        mutation = mutate(record(seed), block, rng)
-        if mutation is None:
-            continue
-        total += 1
-        if _pairs_correctly(diff_runs(mutation.original, mutation.mutant), mutation):
-            aligned_hits += 1
-        if _pairs_correctly(
-            diff_runs_by_index(mutation.original, mutation.mutant), mutation
-        ):
-            naive_hits += 1
+    results = localization_by_kind(seeds)
+    total = sum(r.total for r in results)
+    aligned = sum(r.aligned for r in results)
+    naive = sum(r.naive for r in results)
+    worst = min(results, key=lambda r: r.rate(r.aligned))
 
     return Measurement(
         name="Divergence localization",
-        value=100.0 * aligned_hits / total if total else 0.0,
+        value=100.0 * aligned / total if total else 0.0,
         unit="%",
-        baseline=100.0 * naive_hits / total if total else 0.0,
+        baseline=100.0 * naive / total if total else 0.0,
         baseline_label="index-by-index zip() pairing",
-        detail=f"{aligned_hits}/{total} mutants had the changed step paired with its counterpart",
+        detail=(
+            f"{aligned}/{total} mutants across {len(results)} mutation classes had "
+            f"every changed step paired with its counterpart; "
+            f"worst class is {worst.kind} at {worst.rate(worst.aligned):.1f}%"
+        ),
+        breakdown=[r.line() for r in results],
         caveat=(
-            "the injected insertion is a real recorded recovery block, but where "
-            "it goes and which step is changed are chosen by a seeded RNG"
+            "an average over mutation classes, and the classes are not equally "
+            "hard -- read the per-class lines, not this number. Insertions are "
+            "real recorded recovery blocks; the rest are synthetic edits, and "
+            "where each one lands is chosen by a seeded RNG"
         ),
     )
 
 
 @dataclass
 class Mutation:
-    """A recording, a copy of it with a known change, and where the change is."""
+    """A recording, a copy of it edited in a known way, and the ground truth.
 
+    ``expected`` is the correspondence a perfect diff would find: original step
+    index to mutant step index, for every step that survived. A single offset
+    was enough while the only edit was an insertion; deletions and reorderings
+    need the whole map, and needing the whole map is what makes the harder
+    mutations scoreable at all.
+    """
+
+    kind: str
     original: Run
     mutant: Run
-    changed_step: int
-    offset: int
+    expected: dict[int, int]
+    changed: set[int]
+    removed: set[int] = field(default_factory=set)
 
-    @property
-    def counterpart(self) -> int:
-        return self.changed_step + self.offset
+    def localized_by(self, diff: Any) -> bool:
+        """Is every changed step paired with its counterpart and marked changed?
 
+        This is the README's metric. It deliberately says nothing about the
+        steps that were *not* changed -- a diff can pair those badly and still
+        point a human at the right place.
+        """
+        for step in self.changed:
+            column = next((c for c in diff.columns if c.left_index == step), None)
+            if (
+                column is None
+                or column.right_index != self.expected.get(step)
+                or column.op is not Op.CHANGED
+            ):
+                return False
+        return True
 
-def _pairs_correctly(diff, mutation: Mutation) -> bool:
-    column = next(
-        (c for c in diff.columns if c.left_index == mutation.changed_step), None
-    )
-    return (
-        column is not None
-        and column.right_index == mutation.counterpart
-        and column.op is Op.CHANGED
-    )
+    def pairing_accuracy(self, diff: Any) -> float:
+        """Fraction of surviving steps paired with their true counterpart.
+
+        The harsher metric, and the one that exposes what localization hides: a
+        diff can find the changed step while mispairing everything around it,
+        and a human reading that column list is being misled about the rest of
+        the run even though the headline number says it worked.
+        """
+        if not self.expected:
+            return 1.0
+        paired = {
+            c.left_index: c.right_index
+            for c in diff.columns
+            if c.left_index is not None
+        }
+        hits = sum(1 for k, v in self.expected.items() if paired.get(k) == v)
+        return hits / len(self.expected)
 
 
 def recovery_block(faults: FaultConfig | None = None) -> list[Span]:
@@ -226,35 +313,145 @@ def recovery_block(faults: FaultConfig | None = None) -> list[Span]:
     raise RuntimeError("no recorded run contained a second-guess recovery block")
 
 
-def mutate(run: Run, block: list[Span], rng: random.Random) -> Mutation | None:
-    """Splice ``block`` into a copy of ``run`` and change one later step."""
-    steps = [s.model_copy(deep=True) for s in run.steps()]
-    if len(steps) < 6:
-        return None
+#: A row of a mutant under construction: which original step it came from (or
+#: ``None`` if it was injected), and the span itself.
+Row = tuple[int | None, Span]
 
-    insert_at = rng.randrange(1, len(steps) // 2)
+
+def _inject(block: list[Span]) -> list[Row]:
+    return [(None, span.model_copy(deep=True)) for span in block]
+
+
+def _change_a_tool(rows: list[Row], rng: random.Random, after: int = 0) -> int | None:
+    """Perturb one surviving tool step's output; return which original it was.
+
+    Tool steps rather than model steps: a tool result is where a divergence
+    actually originates, and it is the kind of change somebody would be trying
+    to find.
+    """
     candidates = [
-        i for i in range(insert_at, len(steps)) if steps[i].kind is SpanKind.TOOL
+        i
+        for i in range(after, len(rows))
+        if rows[i][0] is not None and rows[i][1].kind is SpanKind.TOOL
     ]
     if not candidates:
         return None
-    changed_at = rng.choice(candidates)
+    index = rng.choice(candidates)
+    origin, span = rows[index]
+    span.attributes[FR_OUTPUT] = _perturb(span.attr(FR_OUTPUT))
+    return origin
 
-    mutated = [s.model_copy(deep=True) for s in steps]
-    mutated[changed_at].attributes[FR_OUTPUT] = _perturb(
-        mutated[changed_at].attr(FR_OUTPUT)
-    )
-    spliced = (
-        mutated[:insert_at]
-        + [s.model_copy(deep=True) for s in block]
-        + mutated[insert_at:]
-    )
+
+def _mutate_insert(rows: list[Row], block: list[Span], rng: random.Random):
+    """One recovery block spliced in. The original, easiest case."""
+    at = rng.randrange(1, len(rows) // 2)
+    rows = rows[:at] + _inject(block) + rows[at:]
+    changed = _change_a_tool(rows, rng, after=at + len(block))
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_delete(rows: list[Row], block: list[Span], rng: random.Random):
+    """Two steps removed: the mutant is *shorter*, which shifts the other way."""
+    at = rng.randrange(1, len(rows) // 2)
+    rows = rows[:at] + rows[at + 2 :]
+    changed = _change_a_tool(rows, rng, after=at)
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_insert_and_delete(rows: list[Row], block: list[Span], rng: random.Random):
+    """Both, in different places, so the offset is not even constant."""
+    at = rng.randrange(1, len(rows) // 3)
+    rows = rows[:at] + _inject(block) + rows[at:]
+    cut = rng.randrange(at + len(block) + 1, max(at + len(block) + 2, len(rows) - 2))
+    rows = rows[:cut] + rows[cut + 2 :]
+    changed = _change_a_tool(rows, rng, after=cut)
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_double_change(rows: list[Row], block: list[Span], rng: random.Random):
+    """Two divergences and no structural edit at all.
+
+    Index pairing gets this one right, and it is here to prove the benchmark is
+    capable of saying so.
+    """
+    first = _change_a_tool(rows, rng)
+    second = _change_a_tool(rows, rng, after=len(rows) // 2)
+    return rows, {c for c in (first, second) if c is not None}
+
+
+def _mutate_reorder(rows: list[Row], block: list[Span], rng: random.Random):
+    """A pair of steps moved later in the run: the agent did B before A.
+
+    No monotonic alignment can represent this, which is the point of including
+    it. See the write-up in the README.
+    """
+    at = rng.randrange(1, len(rows) // 2)
+    moved = rows[at : at + 2]
+    rest = rows[:at] + rows[at + 2 :]
+    to = rng.randrange(at + 2, len(rest))
+    rows = rest[:to] + moved + rest[to:]
+    changed = _change_a_tool(rows, rng)
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_substitute(rows: list[Row], block: list[Span], rng: random.Random):
+    """One tool call becomes a different tool call in the same slot."""
+    candidates = [
+        i
+        for i, (origin, span) in enumerate(rows)
+        if origin is not None
+        and span.kind is SpanKind.TOOL
+        and span.attr(GEN_AI_TOOL_NAME) != "calculator"
+    ]
+    if not candidates:
+        return rows, set()
+    index = rng.choice(candidates)
+    origin, span = rows[index]
+    span.name = "tool.calculator"
+    span.attributes[GEN_AI_TOOL_NAME] = "calculator"
+    span.attributes[FR_INPUT] = {"expression": "1 + 1"}
+    span.attributes[FR_OUTPUT] = 2.0
+    return rows, {origin}
+
+
+MUTATORS = {
+    "insert": _mutate_insert,
+    "delete": _mutate_delete,
+    "insert+delete": _mutate_insert_and_delete,
+    "double-change": _mutate_double_change,
+    "reorder": _mutate_reorder,
+    "substitute": _mutate_substitute,
+}
+
+
+def mutate(
+    run: Run, block: list[Span], rng: random.Random, kind: str = "insert"
+) -> Mutation | None:
+    """Build one mutant of ``run`` with a known ground-truth correspondence."""
+    steps = [span.model_copy(deep=True) for span in run.steps()]
+    if len(steps) < 8:
+        return None
+
+    rows: list[Row] = [(i, span.model_copy(deep=True)) for i, span in enumerate(steps)]
+    rows, changed = MUTATORS[kind](rows, block, rng)
+    if not changed:
+        return None
+
+    expected = {
+        origin: position
+        for position, (origin, _) in enumerate(rows)
+        if origin is not None
+    }
+    if any(step not in expected for step in changed):
+        return None  # the change landed on a step this mutation also removed
 
     return Mutation(
+        kind=kind,
         original=_as_run(steps, "original"),
-        mutant=_as_run(spliced, "mutant"),
-        changed_step=changed_at,
-        offset=len(block),
+        mutant=_as_run([span for _, span in rows], "mutant"),
+        expected=expected,
+        changed=changed,
+        removed={i for i in range(len(steps)) if i not in expected},
     )
 
 
