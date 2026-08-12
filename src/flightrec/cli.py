@@ -18,7 +18,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.set_defaults(func=None)
 
     # Subcommands are registered as each build step lands:
-    #   diff    - align and diff two recorded runs      (step 8)
     #   bench   - reproduce the numbers in the README   (step 9)
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
@@ -65,6 +64,18 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--temperature", type=float, help="replay at a different temperature")
     replay.add_argument("--store", action="store_true", help="save the replay to the database")
     replay.set_defaults(func=_cmd_replay)
+
+    diff = sub.add_parser("diff", help="align two recorded runs and find where they diverged")
+    diff.add_argument("run_id")
+    diff.add_argument("against", help="the run to compare against")
+    diff.add_argument("--db", default=DEFAULT_DB)
+    diff.add_argument(
+        "--by-index",
+        action="store_true",
+        dest="by_index",
+        help="pair step i with step i instead of aligning -- the baseline, for comparison",
+    )
+    diff.set_defaults(func=_cmd_diff)
 
     cost = sub.add_parser("cost", help="break down a run's spend, or compare two")
     cost.add_argument("run_id")
@@ -223,7 +234,7 @@ def _cmd_cost(args: argparse.Namespace) -> int:
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     from flightrec.replay import ReplayMismatch, replay_run
-    from flightrec.spans import FR_DIVERGENT, FR_OUTPUT, FR_SERVED, SpanStatus
+    from flightrec.spans import FR_DIVERGENT, FR_SERVED, SpanStatus
     from flightrec.storage import RunStore
 
     store = RunStore(args.db)
@@ -259,8 +270,7 @@ def _cmd_replay(args: argparse.Namespace) -> int:
         else:
             source = "re-run"
         marker = "!" if step.status is SpanStatus.ERROR else " "
-        output = str(step.attr(FR_OUTPUT) or step.status_message or "")
-        print(f" {marker} [{index:>2}] {source:<8} {step.name:<18} {output[:56]}")
+        print(f" {marker} [{index:>2}] {source:<8} {step.name:<18} {_outcome_text(step)[:56]}")
 
     print(
         f"\n{replay.served} step(s) served from the recording, "
@@ -287,8 +297,109 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_show(args: argparse.Namespace) -> int:
+#: One character per alignment op. The two that are *not* divergences read as
+#: quiet punctuation, so a run of them does not compete for attention with the
+#: ones that are.
+_DIFF_MARKS = {
+    "match": "=",
+    "cosmetic": "~",
+    "changed": "!",
+    "removed": "-",
+    "inserted": "+",
+}
+
+
+def _cmd_diff(args: argparse.Namespace) -> int:
+    from flightrec.diff import Op, diff_runs, diff_runs_by_index
+    from flightrec.storage import RunStore
+
+    store = RunStore(args.db)
+    left = store.get_run(args.run_id)
+    right = store.get_run(args.against)
+    store.close()
+
+    for run_id, run in ((args.run_id, left), (args.against, right)):
+        if run is None:
+            print(f"no run {run_id!r} in {args.db}")
+            return 1
+
+    diff = (diff_runs_by_index if args.by_index else diff_runs)(left, right)
+
+    print(f"diff {left.run_id} -> {right.run_id}")
+    if args.by_index:
+        print("pairing: index-by-index (baseline; use without --by-index for alignment)")
+    print(f"{'':6} {'':2} {'LEFT':<22} {'RIGHT':<22}")
+
+    for column in diff.columns:
+        mark = _DIFF_MARKS[column.op.value]
+        index = column.index
+        left_name = column.left.name if column.left else ""
+        right_name = column.right.name if column.right else ""
+        detail = ""
+        if column.op is Op.CHANGED:
+            detail = (
+                f"{_short(_outcome_text(column.left))}"
+                f"  ->  {_short(_outcome_text(column.right))}"
+            )
+        elif column.op is Op.COSMETIC:
+            detail = "reworded, same result"
+        print(f" [{index:>2}]  {mark}  {left_name:<22} {right_name:<22} {detail}")
+
+    counts = diff.counts
+    print(
+        f"\n{counts[Op.MATCH]} identical, {counts[Op.COSMETIC]} cosmetic, "
+        f"{counts[Op.CHANGED]} changed, {counts[Op.REMOVED]} only in left, "
+        f"{counts[Op.INSERTED]} only in right"
+    )
+
+    divergence = diff.first_divergence
+    if divergence is None:
+        print(
+            "no genuine divergence: the runs differ only in wording"
+            if counts[Op.COSMETIC]
+            else "the two runs are identical"
+        )
+    else:
+        print(
+            f"first genuine divergence: step {divergence.index} "
+            f"({divergence.op.value}, {divergence.left.name if divergence.left else divergence.right.name})"
+        )
+    return 0
+
+
+def _outcome_text(span: "Span") -> str:
+    """What a step produced, for one line of terminal output.
+
+    Two traps here, and the obvious one-liner falls into both.
+
+    ``attr(FR_OUTPUT) or span.status_message`` treats an empty list as absent --
+    and in this demo an empty list is the *entire failure*, the search that
+    returned nothing and sent the agent off inventing data. Rendering the root
+    cause as blank space is the kind of quiet omission the timeline exists to
+    prevent.
+
+    Testing presence instead is not enough either: a failed tool call records an
+    output of ``None`` deliberately, so presence alone prints "None" where the
+    error message belongs. A step that errored is described by its error.
+    """
     from flightrec.spans import FR_OUTPUT, SpanStatus
+
+    if span.status is SpanStatus.ERROR and span.status_message:
+        return span.status_message
+    if FR_OUTPUT in span.attributes:
+        return str(span.attributes[FR_OUTPUT])
+    return span.status_message or ""
+
+
+def _short(value: object, width: int = 24) -> str:
+    # ASCII ellipsis: the Windows console is frequently cp1252 and turns a real
+    # one into a replacement character.
+    text = str(value if value is not None else "")
+    return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def _cmd_show(args: argparse.Namespace) -> int:
+    from flightrec.spans import SpanStatus
     from flightrec.storage import RunStore
 
     store = RunStore(args.db)
@@ -301,8 +412,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"run {run.run_id}   {len(run.spans)} spans   {run.total_tokens} tokens")
     for step in run.steps():
         marker = "!" if step.status is SpanStatus.ERROR else " "
-        output = str(step.attr(FR_OUTPUT) or step.status_message or "")
-        print(f" {marker} [{step.sequence:>2}] {step.name:<18} {output[:70]}")
+        print(f" {marker} [{step.sequence:>2}] {step.name:<18} {_outcome_text(step)[:70]}")
     return 0
 
 

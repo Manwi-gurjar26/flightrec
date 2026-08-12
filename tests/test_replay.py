@@ -11,13 +11,10 @@ import pytest
 
 from flightrec.demo.agent import ResearchAgent
 from flightrec.demo.tools import FaultConfig
-from flightrec.replay import (
-    ReplayMismatch,
-    first_divergence,
-    replay_run,
-    trajectory,
-)
+from flightrec.replay import ReplayMismatch, replay_run
 from flightrec.spans import (
+    first_divergence,
+    trajectory,
     FR_DIVERGENT,
     FR_INPUT,
     FR_OUTPUT,

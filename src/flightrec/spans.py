@@ -11,6 +11,7 @@ a standard OTel consumer can ignore ours.
 
 from __future__ import annotations
 
+import json
 from enum import Enum
 from typing import Any
 
@@ -237,3 +238,58 @@ class Run(BaseModel):
 
 
 SpanNode.model_rebuild()
+
+
+# --- comparing steps ----------------------------------------------------------
+#
+# These live here, next to the model they compare, rather than in the replay or
+# diff engine. Both need them and neither owns them -- and putting them in
+# ``replay`` would mean ``flightrec diff`` imported the replay engine, and with
+# it the demo agent, to compare two rows out of a database.
+
+
+def stable_key(value: Any) -> str:
+    """A canonical string for any recorded attribute value.
+
+    Attributes come back from JSON storage, so dict ordering is not guaranteed
+    to survive a round trip. Sorting keys means a step compares equal to itself
+    after being written and read back, which every comparison here depends on.
+    """
+    return json.dumps(value, sort_keys=True, default=str)
+
+
+def step_signature(span: Span) -> tuple[str, ...]:
+    """What makes two steps "the same step".
+
+    Span IDs and timestamps are excluded: a replay cannot recover the
+    recording's UUIDs or its wall clock, and two runs of the same agent never
+    share them. Everything describing *what happened* is included, so a step
+    that produced different output can never pass as the same step.
+    """
+    return (
+        span.kind.value,
+        span.name,
+        stable_key(span.attr(FR_INPUT)),
+        stable_key(span.attr(FR_OUTPUT)),
+        span.status.value,
+    )
+
+
+def trajectory(run: Run) -> list[tuple[str, ...]]:
+    return [step_signature(span) for span in run.steps()]
+
+
+def first_divergence(left: Run, right: Run) -> int | None:
+    """Index of the first step where two runs disagree, or ``None`` if identical.
+
+    Index-by-index, which is only honest for a run and its own replay -- those
+    are meant to be the same sequence, so a shift is itself the bug. Comparing
+    two *different* runs needs alignment first; that is :mod:`flightrec.diff`.
+    """
+    a, b = trajectory(left), trajectory(right)
+    for index, (x, y) in enumerate(zip(a, b)):
+        if x != y:
+            return index
+    if len(a) != len(b):
+        return min(len(a), len(b))
+    return None

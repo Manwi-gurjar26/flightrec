@@ -25,7 +25,6 @@ stops there instead. See the README for why guessing forward is the default.
 from __future__ import annotations
 
 import hashlib
-import json
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -46,6 +45,8 @@ from flightrec.spans import (
     SpanEvent,
     SpanKind,
     SpanStatus,
+    first_divergence,
+    stable_key,
 )
 from flightrec.tracer import Tracer
 
@@ -177,50 +178,6 @@ def _reconstruct(span: Span) -> Exception:
     return _EXCEPTIONS.get(type_name, ToolError)(detail or message)
 
 
-# --- comparing trajectories ---------------------------------------------------
-
-
-def step_signature(span: Span) -> tuple[str, ...]:
-    """What makes two steps "the same step" for fidelity purposes.
-
-    Span IDs and timestamps are excluded because a replay cannot recover the
-    recording's UUIDs or its wall clock. Everything that describes *what
-    happened* is included, so a replay that produced different output or a
-    different status can never pass as faithful.
-    """
-    return (
-        span.kind.value,
-        span.name,
-        _stable(span.attr(FR_INPUT)),
-        _stable(span.attr(FR_OUTPUT)),
-        span.status.value,
-    )
-
-
-def trajectory(run: Run) -> list[tuple[str, ...]]:
-    return [step_signature(span) for span in run.steps()]
-
-
-def first_divergence(left: Run, right: Run) -> int | None:
-    """Index of the first step where two runs disagree, or ``None`` if identical.
-
-    Index-by-index, which is only honest for a run and its own replay -- those
-    are meant to be the same sequence. Comparing two *different* runs needs
-    alignment first; that is step 8's job, not this function's.
-    """
-    a, b = trajectory(left), trajectory(right)
-    for index, (x, y) in enumerate(zip(a, b)):
-        if x != y:
-            return index
-    if len(a) != len(b):
-        return min(len(a), len(b))
-    return None
-
-
-def _stable(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, default=str)
-
-
 # --- the engine ---------------------------------------------------------------
 
 
@@ -344,7 +301,7 @@ def _identity(
     ID space from what makes this replay distinct keeps replays of one recording
     bit-identical while keeping different ones apart.
     """
-    material = _stable([run.run_id, from_step, strict, edits])
+    material = stable_key([run.run_id, from_step, strict, edits])
     return int.from_bytes(hashlib.blake2b(material.encode(), digest_size=8).digest())
 
 

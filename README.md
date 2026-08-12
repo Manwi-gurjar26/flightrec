@@ -61,6 +61,9 @@ flightrec serve --db flightrec.db           # open http://127.0.0.1:8000
 flightrec replay <run_id>                   # reproduce it, step for step
 flightrec replay <run_id> --from-step 4     # rerun live from step 4 onward
 flightrec replay <run_id> --from-step 4 --strict   # stop there instead
+
+flightrec diff <run_a> <run_b>              # align them, find the divergence
+flightrec diff <run_a> <run_b> --by-index   # the naive pairing, for comparison
 ```
 
 The UI is server-rendered Jinja2 with **no JavaScript and no external requests** —
@@ -186,7 +189,41 @@ This is a sequence alignment problem. It needs:
   sequences up before any comparison happens;
 - only then, a **first genuine divergence** to point at.
 
-TODO: the gap penalty tuning, and the cases where alignment still gets it wrong.
+**The gap-open penalty is a tie-breaker, not a force, and tuning it as a force
+is a bug.** It was set to -0.6 first. With that value the aligner preferred
+pairing a *tool* step against a *chat* step — similarity 0.0, nothing in common
+whatsoever — over opening a second gap. The ceiling is set by the similarity
+function itself: its smallest component is 0.2, which is 0.4 in score terms, so
+a gap-open above that outbids real evidence. It is now -0.25, and a test asserts
+both the pairing and the bound.
+
+**Affine gaps buy less than the textbook suggests.** The first test written for
+them asserted that an inserted three-step block stays contiguous — which it
+does, under affine *and* under every linear penalty tried. The steps around the
+block match perfectly, so nothing is gained by splitting it and no penalty
+scheme splits it. That test proved nothing, exactly like the clock test in
+section 1 would have with a real clock. The case where affine genuinely decides
+the outcome is narrower: when several candidate partners score *identically*,
+one gap of two and two gaps of one are exactly tied under a linear penalty and
+the winner comes down to evaluation order. Affine makes "one event produced one
+block" the principled answer rather than the lucky one. That is worth having,
+and it is a smaller claim than "linear shreds retry blocks".
+
+**Known limitation, and it is the honest headline for this section: the demo
+corpus cannot demonstrate any of this.** All 40 seeds produce trajectories of
+exactly 11 steps, because the demo agent's policy is fixed — search, fetch,
+search, fetch, calculate, answer. Faults change *what* each step returns, never
+*how many* there are. With no length difference, alignment and `zip()` produce
+identical output, which is why `flightrec diff --by-index` on two demo runs
+looks the same as without it. The alignment is exercised by constructed cases in
+`tests/test_diff.py` and would matter for any agent that retries, backtracks or
+loops a variable number of times. Making the measurement in step 9 mean
+anything requires a corpus whose runs differ in length; that is a change to the
+demo agent, and it is step 9's first problem rather than something to paper over
+here.
+
+TODO: the cases where alignment still gets it wrong, once it has run against a
+corpus that can produce them.
 
 ## Architecture
 
@@ -241,7 +278,7 @@ without an API key.
 - [x] 5. Timeline UI
 - [x] 6. Token / cost rollups
 - [x] 7. Deterministic replay
-- [ ] 8. Run diff with sequence alignment
+- [x] 8. Run diff with sequence alignment
 - [ ] 9. Measurement harness → real numbers in this README
 
 ## What I would do with two more weeks
