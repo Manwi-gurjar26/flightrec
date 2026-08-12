@@ -70,6 +70,11 @@ class Measurement:
         }
 
 
+def _shape(span: Span) -> tuple[str, str]:
+    """What a step *is*, ignoring what it was given and what it returned."""
+    return (span.kind.value, str(span.attr(GEN_AI_TOOL_NAME) or span.name))
+
+
 def _format(value: float, unit: str) -> str:
     if unit == "%":
         return f"{value:.1f}%"
@@ -154,21 +159,27 @@ class KindResult:
         return 100.0 * hits / self.total if self.total else 0.0
 
     def line(self) -> str:
+        # Blame and structure carry their denominators because they do not
+        # apply to every mutant. "structure 100%" over eight of thirty-eight
+        # cases is a different claim from "structure 100%", and printing the
+        # first as the second is how a number gets quoted without its limits.
         blame = (
-            f"   blame {100.0 * self.blamed / self.blame_total:5.1f}%"
+            f"   blame {100.0 * self.blamed / self.blame_total:5.1f}% "
+            f"({self.blame_total}/{self.total})"
             if self.blame_total
+            else ""
+        )
+        structure = (
+            f"   structure {self.structure:5.1f}% "
+            f"({self.structure_total}/{self.total})"
+            if self.structure_total
             else ""
         )
         return (
             f"{self.kind:<14} localized {self.rate(self.aligned):5.1f}% "
             f"(zip {self.rate(self.naive):5.1f}%)   "
             f"pairing {self.aligned_pairing:5.1f}% (zip {self.naive_pairing:5.1f}%)"
-            f"{blame}"
-            + (
-                f"   structure {self.structure:5.1f}%"
-                if self.structure_total
-                else ""
-            )
+            f"{blame}{structure}"
         )
 
 
@@ -358,17 +369,27 @@ class Mutation:
         telling a human that two steps correspond when they have nothing to do
         with each other.
 
-        Only *decidable* additions and removals are scored, and getting that
-        wrong made this metric report failures that were the metric's fault:
+        Only *decidable* additions and removals are scored. Three separate
+        rounds of this metric reported failures that were its own fault, all the
+        same mistake -- demanding one description where two are equally true:
 
-        * a step injected as a copy of one that was deleted elsewhere is a
-          **move**, and the diff is right to call it one;
+        * a step injected as a copy of one deleted elsewhere is a **move**, and
+          the diff is right to call it one;
         * a step duplicated verbatim leaves two identical steps, and which twin
-          is "the extra one" has no answer at all.
+          is "the extra one" has no answer;
+        * a ``fetch_page`` deleted here and a *different* ``fetch_page`` added
+          there is either "one call removed and another added" or "one call
+          whose URL changed", and nothing distinguishes them.
 
-        In both cases the diff was being marked down for describing the run
-        correctly. Anything whose signature is not unique is excluded, and
-        ``None`` comes back when that leaves nothing to score.
+        So a removed step is scored only when no added step could be taken for
+        it, and vice versa -- same kind and same tool name is enough to be
+        confusable. That is a structural test rather than a tuned threshold, and
+        deliberately not the diff's own 0.9, which would be scoring the diff
+        against its own opinion. It leaves the genuinely unambiguous case
+        scored: a step whose tool appears nowhere in the other run has a fact of
+        the matter, and ``adjacent-edit`` still fails on it.
+
+        ``None`` comes back when nothing decidable is left.
         """
         mutant_steps = self.mutant.steps()
         original_steps = self.original.steps()
@@ -381,14 +402,23 @@ class Mutation:
         elsewhere = {step_signature(step) for step in original_steps}
         elsewhere |= {step_signature(mutant_steps[j]) for j in self.expected.values()}
 
-        accountable_injected = {
-            j for j in injected if step_signature(mutant_steps[j]) not in elsewhere
-        }
+        # Shape = kind plus tool name. Two steps of the same shape on opposite
+        # sides of an edit are interchangeable descriptions of the same event.
+        removed_shapes = {_shape(original_steps[i]) for i in self.removed}
+        injected_shapes = {_shape(mutant_steps[j]) for j in injected}
         injected_signatures = {step_signature(mutant_steps[j]) for j in injected}
+
+        accountable_injected = {
+            j
+            for j in injected
+            if step_signature(mutant_steps[j]) not in elsewhere
+            and _shape(mutant_steps[j]) not in removed_shapes
+        }
         accountable_removed = {
             i
             for i in self.removed
             if step_signature(original_steps[i]) not in injected_signatures
+            and _shape(original_steps[i]) not in injected_shapes
         }
 
         expected_gaps = len(accountable_injected) + len(accountable_removed)

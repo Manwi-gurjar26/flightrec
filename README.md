@@ -421,13 +421,46 @@ be scored on either, so the duplicated step is now barred from also being the
 edited one. Scoring was fixed to match: two mutant steps with identical
 signatures are the same answer, and picking between them is a coin toss.
 
-**What is still not solved.** Which *side* of a swap is "the one that moved" is
-genuinely ambiguous — "steps 1–2 happened later" and "steps 3–4 happened earlier"
-describe one event, the two backbones are the same length, and the tie-break is
-arbitrary. The tests assert the pairing, which is not ambiguous, and explicitly
-allow either labelling. `structure` stays at 0% on `adjacent-edit` and 78% on
-`insert+delete` for the reason above: a replacement and a substitution are the
-same shape, and the diff cannot be asked to treat them differently.
+### Ground truth was wrong three times, in the same way each time
+
+`insert+delete` sat at 78% on `structure` and the assumption — mine, stated
+twice before checking — was that it was the same replacement-versus-substitution
+trade-off as `adjacent-edit`. It was not. It was the ground truth being
+over-specified, for the third time:
+
+| What the mutation did | What the diff said | Both true? |
+|---|---|---|
+| copied a step to where another was deleted | "it moved" | yes |
+| duplicated a step verbatim | paired the other twin | yes — they are identical |
+| deleted a `fetch_page`, added a different `fetch_page` | "one call, changed URL" | yes |
+
+Each time the benchmark demanded one description where two are equally correct,
+and each time the diff was marked wrong for being right. So a removed step is
+now scored only when no added step could be taken for it — same kind and same
+tool name is enough to be confusable. That is a structural test, deliberately
+not the diff's own 0.9 threshold, which would be scoring the diff against its own
+opinion.
+
+**This is the point at which a benchmark starts lying to you**, so it is worth
+being blunt about the cost: that exclusion drops `insert+delete` from 38 scored
+cases to 8. The remaining 8 pass, and the class now reads `structure 100% (8/38)`
+rather than `100%`. Two tests guard the rule from being widened until nothing is
+left — one asserts the metric still scores whole classes, the other that it still
+*fails* the class it should.
+
+**What is still not solved.** `adjacent-edit` scores 0% on `structure`, over all
+40 of its cases, and that one is real: it injects a tool that appears nowhere in
+the other run, so "nothing here corresponds" is the only true description rather
+than one of two. The diff pairs those steps anyway because two gap blocks cost
+−2.9 and two weak substitutions cost −1.2 — and it cannot simply be made to
+prefer gapping, because "one step replaced by an unrelated step" is locally
+identical to a tool substitution, which the `substitute` class exists to check it
+pairs. The two expectations contradict each other.
+
+Which *side* of a swap is "the one that moved" also stays ambiguous — "steps 1–2
+happened later" and "steps 3–4 happened earlier" describe one event, the two
+backbones are the same length, and the tie-break is arbitrary. The tests assert
+the pairing, which is not ambiguous, and explicitly allow either labelling.
 
 ## Architecture
 
@@ -498,6 +531,11 @@ others disagree with it, deliberately:
 | `pairing` | was *every* surviving step paired correctly? | 100% everywhere |
 | `blame` | is the first divergence reported the real one? | 100% everywhere |
 | `structure` | are added and removed steps reported as added and removed? | **adjacent-edit, 0%** |
+
+`blame` and `structure` do not apply to every mutant and print their
+denominators for that reason — `structure 100% (8/38)` is a different claim from
+`structure 100%`, and printing the first as the second is how a number gets
+quoted without its limits.
 
 A blank column means the metric has no answer for that class — not a perfect
 score. `structure` is the one that still fails, and

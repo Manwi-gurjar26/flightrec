@@ -214,6 +214,37 @@ def test_the_adjacent_edit_injects_something_unmatchable() -> None:
     assert mutation.removed, "and must actually delete something"
 
 
+def test_the_structure_metric_still_scores_something() -> None:
+    """Excluding undecidable cases must not empty the metric out.
+
+    Ground truth is only allowed to score added and removed steps that could
+    not be mistaken for each other, and that exclusion has been widened three
+    times. Widen it once more and every case disappears, at which point the
+    remaining classes report a flattering 100% over nothing at all -- which is
+    exactly the failure this whole benchmark exists to avoid.
+    """
+    results = {r.kind: r for r in localization_by_kind(SEEDS)}
+
+    assert results["delete"].structure_total == results["delete"].total
+    assert results["adjacent-edit"].structure_total == results["adjacent-edit"].total
+    assert results["insert"].structure_total > 0
+    assert results["insert+delete"].structure_total > 0
+
+
+def test_the_structure_metric_still_reports_a_failure() -> None:
+    """The one class it fails on has a fact of the matter, and must keep failing.
+
+    ``adjacent-edit`` injects a tool that appears nowhere in the other run, so
+    "nothing here corresponds" is not one of two equally good descriptions -- it
+    is the only true one. If this starts passing, either the diff learned to gap
+    unmatchable steps or the exclusion rule swallowed the last real case.
+    """
+    adjacent = next(r for r in localization_by_kind(SEEDS) if r.kind == "adjacent-edit")
+
+    assert adjacent.structure_total > 0
+    assert adjacent.structure < 100.0
+
+
 def test_structure_has_no_answer_for_a_duplicated_step() -> None:
     """Ground truth has to admit when it does not know.
 
