@@ -13,3 +13,6 @@ htmlcov/
 *.sqlite3
 runs/
 traces/
+
+# local reference material, not part of the project
+AI-Portfolio-Projects.pdf
