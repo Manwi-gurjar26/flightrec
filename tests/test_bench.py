@@ -390,3 +390,49 @@ def test_a_repeat_block_leaves_many_indistinguishable_candidates() -> None:
 
     assert repeated >= 3, "the point of this class is many identical steps"
     assert mutation.localized_by(diff_runs(mutation.original, mutation.mutant))
+
+
+def test_overhead_is_measured_against_step_duration_not_divided_out() -> None:
+    """The claim "under 5% for a step longer than X" used to be arithmetic.
+
+    It was the per-span cost divided by 0.05, printed as though it had been
+    observed. Overhead is a ratio and depends entirely on what a step does, so
+    the only honest way to report it is to run the thing at several step
+    durations and look.
+    """
+    from flightrec.bench import overhead_curve
+
+    curve = overhead_curve(step_workloads=(20, 200, 2000), repeats=8)
+
+    assert [p.step_us for p in curve] == [20, 200, 2000]
+    assert curve[0].overhead_pct > curve[-1].overhead_pct, (
+        "overhead must fall as steps get slower -- a fixed cost over a growing "
+        "denominator"
+    )
+    assert any(p.overhead_pct < 5.0 for p in curve), "there has to be a crossing"
+
+
+def test_the_overhead_cost_per_span_is_roughly_fixed() -> None:
+    """What makes the curve a curve rather than a coincidence.
+
+    The SDK's cost does not depend on how long the step took, so the *absolute*
+    milliseconds added should be about the same at every point. If that stops
+    holding, the shape above is being produced by something else and the
+    crossover means nothing.
+    """
+    from flightrec.bench import overhead_curve
+
+    added = [p.traced_ms - p.bare_ms for p in overhead_curve(
+        step_workloads=(50, 500), repeats=12
+    )]
+
+    assert all(value > 0 for value in added)
+    assert max(added) < 4 * min(added), f"added time should be near-constant: {added}"
+
+
+def test_the_overhead_measurement_reports_its_spread() -> None:
+    """A timing claim without a spread is a claim about one afternoon."""
+    result = measure_overhead(repeats=6)
+
+    assert "across" in result.detail, "the range of observed runs has to be shown"
+    assert result.breakdown, "and the curve, which is the actual answer"

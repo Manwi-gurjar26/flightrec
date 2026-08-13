@@ -16,9 +16,11 @@ deterministically from any step, and diff two runs to find exactly where they di
 > *This README was written before the code, deliberately, with each number as a
 > target and a defined measurement procedure. Two targets were met — the second
 > only after the benchmark was made harsh enough to break the thing it was
-> measuring — one had no target, and one was missed by a factor of about twenty.
-> See [Measurement](#measurement), where the miss is written up rather than
-> quietly dropped.*
+> measuring — one had no target, and one is missed by about twentyfold on the
+> demo agent and met on anything whose steps take longer than 250µs. See
+> [Measurement](#measurement), where the miss is written up rather than quietly
+> dropped, along with the number this README printed for a while without ever
+> having measured it.*
 
 ---
 
@@ -654,12 +656,13 @@ flightrec bench --json          # machine-readable
 | **Partial replay fidelity** | **100%** (528/528 cut points) | 41% — re-running and hoping the first N steps match | — | — |
 | **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
-| **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
+| **Overhead** | **~8µs per span**; under 5% once a step takes ~250µs | uninstrumented agent | < 5% wall clock | **missed on this agent** |
 
-The first three are exact and reproduce on any machine — they are counts, and the
+The first four are exact and reproduce on any machine — they are counts, and the
 seeds are fixed. The overhead row is a timing measurement and moves by a few
 percent between runs and considerably more between machines; it is quoted with a
-`~` for that reason rather than to round it in a flattering direction.
+`~` for that reason rather than to round it in a flattering direction, and the
+harness prints the observed range alongside it.
 
 Five things these numbers do not say, in descending order of how much they matter:
 
@@ -715,14 +718,40 @@ prefix, serves exactly that many steps, and repeats byte-identically is a far
 stronger claim than the one that was on the table, and it is the claim a user
 actually relies on.
 
-**The overhead target was missed by a factor of about twenty, and the percentage
-is the wrong number to read.** Every step of the demo agent is local and finishes
-in microseconds, so a fixed per-span cost lands on a run that does almost nothing
-— roughly 0.2ms instrumented against 0.1ms bare. The portable figure is ~8µs per
-span, which stays under the 5% target for any run longer than about 2ms. One real
-model call is three orders of magnitude past that. The percentage is reported
-anyway because it is what the target asked for, and moving the goalposts after
-seeing the result is how benchmarks become press releases.
+**The overhead target is missed on the demo agent — by about twentyfold — and
+the percentage is the wrong number to read.** Overhead is a *ratio*, so it
+depends entirely on what a step does, and every step of this agent is local and
+finishes in microseconds. The percentage is still reported, because it is what
+the target asked for and moving the goalposts after seeing the result is how
+benchmarks become press releases.
+
+But the useful answer is the curve, and `flightrec bench` now measures it
+instead of deriving it:
+
+```
+step of     10us   traced   0.197ms   bare   0.121ms   overhead   61.9%
+step of     50us   traced   0.681ms   bare   0.602ms   overhead   13.2%
+step of    100us   traced   1.283ms   bare   1.201ms   overhead    6.8%
+step of    250us   traced   3.095ms   bare   3.002ms   overhead    3.1%
+step of    500us   traced   6.100ms   bare   6.002ms   overhead    1.6%
+```
+
+A fixed ~8µs per span over a growing denominator. It crosses 5% once a step takes
+about 250µs; a real model call is four orders of magnitude past that.
+
+**The previous version of this row printed a number it had never observed.** It
+divided the per-span cost by 0.05 and reported "stays under 5% for any run longer
+than 2ms" — true by construction, checked by nobody, in the one section of this
+README that exists to insist on the opposite. Two smaller things came out of
+fixing it: the curve is measured against a bare loop rather than a no-op tracer,
+so it answers what instrumenting costs somebody who has none; and it takes the
+*minimum* of repeated samples rather than the median, because at 12ms per sample
+a single scheduler quantum lands in the middle of the distribution and bent the
+curve upwards at the long end, where the fixed cost should be vanishing.
+
+Cost is dominated by span validation and UUID generation. Both are deliberate,
+and one tempting fix is not one: `Span.model_construct`, which skips pydantic
+validation, measured **125× slower** than the validated path.
 
 **The replay saving is smaller than "skip half the steps" suggests, for a
 structural reason.** A model call's prompt carries the whole transcript so far,
