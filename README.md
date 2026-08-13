@@ -963,6 +963,8 @@ using the thing, and each item is a section above rather than a bullet here:
       metric blind spot, and two claims that were arithmetic rather than measurement
 - [x] An adjustable task length, and a banded alignment for the long runs it exposed
 - [x] The flaky-step report, which promptly found a bug in the diff it was built on
+- [x] Tests that read this README, because every documentation error in this
+      project was in prose no test read
 
 ## What I would do with two more weeks
 
