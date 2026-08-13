@@ -13,7 +13,7 @@ from flightrec.demo.agent import ResearchAgent
 from flightrec.demo.tools import FaultConfig
 from flightrec.determinism import SeededIdGenerator, VirtualClock
 from flightrec.sinks import MemorySink
-from flightrec.spans import FR_OUTPUT, Run, Span, SpanKind, SpanStatus
+from flightrec.spans import FR_OUTPUT, GEN_AI_TOOL_NAME, Run, Span, SpanKind, SpanStatus
 from flightrec.storage import RunStore
 from flightrec.tracer import Tracer
 from flightrec.web import build_timeline, format_duration
@@ -225,6 +225,101 @@ def test_an_ordinary_run_carries_no_provenance_noise(store):
 
     assert not view.is_replay
     assert not any(step.provenance for step in view.steps)
+
+
+def test_diff_page_aligns_two_runs(client, store):
+    """The diff was command-line only for two build steps.
+
+    It is the feature that gained the most work and the one a person was least
+    able to see, which is a poor combination for a tool whose whole argument is
+    that the readable version is the point.
+    """
+    left = make_run(seed=1)
+    right = make_run(seed=4)
+    store.add_run(left)
+    store.add_run(right)
+
+    response = client.get("/diff", params={"left": left.run_id, "right": right.run_id})
+
+    assert response.status_code == 200
+    assert "First divergence" in response.text
+    assert left.run_id[:12] in response.text
+    assert right.run_id[:12] in response.text
+
+
+def test_diff_page_says_when_two_runs_are_the_same(client, store):
+    run = make_run(seed=1)
+    store.add_run(run)
+
+    response = client.get("/diff", params={"left": run.run_id, "right": run.run_id})
+
+    assert "identical" in response.text
+    assert "diverged" not in response.text
+
+
+def test_diff_page_distinguishes_changed_from_replaced(store):
+    """The two words the diff learned to tell apart must survive into the UI.
+
+    Collapsing them in the template would undo the distinction at the last step,
+    where it is the only thing a reader actually sees.
+    """
+    from flightrec.web import build_diff
+
+    left = make_run(seed=1)
+    right = make_run(seed=1)
+    step = right.steps()[3]
+    step.name = "tool.calculator"
+    step.attributes[GEN_AI_TOOL_NAME] = "calculator"
+
+    rows = {row.op for row in build_diff(left, right).rows}
+
+    assert "replaced" in rows
+    assert "a different step entirely" in [
+        row.label for row in build_diff(left, right).rows
+    ]
+
+
+def test_a_reordered_step_is_not_rendered_as_quiet_background(client, store):
+    """A moved step's op is ``match`` -- its content is identical.
+
+    Styling the table by op alone would paint a reordering as unchanged
+    background, which is the one thing it is not.
+    """
+    import random
+
+    from flightrec.bench import mutate, recovery_block
+
+    mutation = mutate(make_run(seed=1), recovery_block(), random.Random(2), kind="reorder")
+    assert mutation is not None
+    for run, name in ((mutation.original, "l"), (mutation.mutant, "r")):
+        for span in run.spans:
+            span.trace_id, span.span_id = name, f"{name}-{span.sequence}"
+        store.add_run(run)
+
+    html = client.get("/diff", params={"left": "l", "right": "r"}).text
+
+    assert "d-moved" in html
+    assert "d-moved d-quiet" not in html
+
+
+def test_diff_page_for_a_missing_run_is_404(client, store):
+    run = make_run(seed=1)
+    store.add_run(run)
+
+    assert client.get("/diff", params={"left": run.run_id, "right": "nope"}).status_code == 404
+    assert client.get("/diff", params={"left": "nope", "right": run.run_id}).status_code == 404
+
+
+def test_the_run_list_offers_a_comparison_without_javascript(client, store):
+    """A plain GET form is the whole mechanism, because there is no JS to lean on."""
+    store.add_run(make_run(seed=1))
+    store.add_run(make_run(seed=4))
+
+    html = client.get("/").text
+
+    assert 'action="/diff"' in html
+    assert 'method="get"' in html
+    assert "<script" not in html
 
 
 def test_timeline_page_for_a_missing_run_is_404(client):

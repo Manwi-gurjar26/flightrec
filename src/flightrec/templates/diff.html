@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}diff - flightrec{% endblock %}
+{% block subtitle %}
+  <span class="mono">{{ view.left_id[:12] }}</span> &rarr;
+  <span class="mono">{{ view.right_id[:12] }}</span>
+{% endblock %}
+
+{% block content %}
+<div class="stats">
+  <div class="stat">
+    <div class="k">Verdict</div>
+    <div class="v {{ 'ok' if view.identical else 'error' }}">
+      {{ 'identical' if view.identical else 'diverged' }}
+    </div>
+  </div>
+  <div class="stat">
+    <div class="k">First divergence</div>
+    <div class="v">{{ 'step ' ~ view.divergence_index if view.divergence_index is not none else '&mdash;'|safe }}</div>
+  </div>
+  <div class="stat"><div class="k">Steps</div><div class="v">{{ view.left_steps }} &rarr; {{ view.right_steps }}</div></div>
+  <div class="stat"><div class="k">Changed</div><div class="v">{{ view.counts['changed'] }}</div></div>
+  <div class="stat"><div class="k">Replaced</div><div class="v">{{ view.counts['replaced'] }}</div></div>
+  <div class="stat"><div class="k">Reordered</div><div class="v">{{ view.moved_count }}</div></div>
+  <div class="stat"><div class="k">Only left</div><div class="v">{{ view.counts['removed'] }}</div></div>
+  <div class="stat"><div class="k">Only right</div><div class="v">{{ view.counts['inserted'] }}</div></div>
+</div>
+
+{% if view.counts['cosmetic'] and view.divergence_index is none %}
+<p class="notice" style="margin-bottom:16px">
+  These runs differ only in wording. {{ view.counts['cosmetic'] }} step{{ '' if view.counts['cosmetic'] == 1 else 's' }}
+  used different arguments and got the same result, which is reported but is not
+  a candidate for what went wrong.
+</p>
+{% endif %}
+
+<table class="diff">
+  <thead>
+    <tr>
+      <th class="right">#</th>
+      <th></th>
+      <th>{{ view.left_id[:12] }}</th>
+      <th>{{ view.right_id[:12] }}</th>
+      <th>What changed</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for row in view.rows %}
+    {# Rows that are genuinely different get the emphasis. A run of identical
+       steps should read as quiet background, or the eye has nothing to land on. #}
+    {# A moved step's op is usually "match" -- its content is identical, it just
+       happened somewhere else. Styling by op alone would render a reordering as
+       quiet background, which is the one thing it is not. #}
+    <tr class="d-{{ 'moved' if row.moved else row.op }}{{ ' d-quiet' if not row.genuine }}">
+      <td class="right mono muted">{{ row.left_index if row.left_index is not none else row.right_index }}</td>
+      <td><span class="pill {{ 'error' if row.op in ('removed', 'inserted', 'replaced') else ('warn' if row.op == 'changed' or row.moved else 'ok') }}">
+        {{ 'moved' if row.moved else row.op }}
+      </span></td>
+      <td class="mono">
+        {% if row.left_name %}{{ row.left_name }}
+          <div class="muted small">{{ row.left_text[:70] }}{{ '...' if row.left_text|length > 70 }}</div>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
+      <td class="mono">
+        {% if row.right_name %}{{ row.right_name }}
+          <div class="muted small">{{ row.right_text[:70] }}{{ '...' if row.right_text|length > 70 }}</div>
+        {% else %}<span class="muted">&mdash;</span>{% endif %}
+      </td>
+      <td class="small">
+        {{ row.label }}
+        {% if row.moved %}<br><span class="muted">done at step {{ row.right_index }} in the right run</span>{% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<p class="muted small" style="margin-top:16px">
+  Steps are aligned with Needleman&ndash;Wunsch and a second pass that recovers
+  reorderings, not paired by index &mdash; so an extra retry in one run does not
+  make every step after it look changed.
+  <a href="/">back to runs</a>
+</p>
+{% endblock %}

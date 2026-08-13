@@ -18,7 +18,7 @@ from flightrec.pricing import format_usd
 from flightrec.rollup import RunCost, build_rollup
 from flightrec.spans import Run, Span, SpanNode
 from flightrec.storage import RunStore, RunSummary
-from flightrec.web import build_timeline, format_duration, format_timestamp
+from flightrec.web import build_diff, build_timeline, format_duration, format_timestamp
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -80,6 +80,25 @@ def create_app(store: RunStore | None = None, db_path: str | Path = "flightrec.d
             request,
             "timeline.html",
             {"view": build_timeline(run), "cost": build_rollup(run)},
+        )
+
+    # Query parameters rather than path segments so a plain <form method="get">
+    # can reach this. The UI has no JavaScript, so the form has to be the whole
+    # mechanism -- and a GET keeps the result linkable and back-button safe.
+    @app.get("/diff", response_class=HTMLResponse)
+    def diff(
+        request: Request,
+        left: str = Query(...),
+        right: str = Query(...),
+        store: RunStore = Depends(get_store),
+    ) -> Any:
+        left_run = store.get_run(left)
+        right_run = store.get_run(right)
+        for run_id, run in ((left, left_run), (right, right_run)):
+            if run is None:
+                raise HTTPException(status_code=404, detail=f"no run {run_id!r}")
+        return templates.TemplateResponse(
+            request, "diff.html", {"view": build_diff(left_run, right_run)}
         )
 
     @app.get("/healthz")

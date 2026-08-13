@@ -59,7 +59,9 @@ thing*.
 - **Replay.** Re-run from step N with every earlier step served from the recording. Change
   one prompt and see the effect without paying for the first six steps again.
 - **Diff.** Put two runs side by side, align their steps properly, and point at the first
-  genuine divergence. Command line only: `flightrec diff`.
+  genuine divergence — in the browser at `/diff`, or `flightrec diff` on the
+  command line. Matching steps are dimmed rather than hidden, because a run of
+  quiet rows is what makes the loud ones findable.
 
 ```bash
 flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
@@ -512,20 +514,20 @@ labelling.
         ▼                                               ▼
   replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
         │                                               │
-        │                                               ▼
-        │                                    timeline UI (Jinja2, no JS)
-        │                                    · marks replayed vs live steps
-        ▼
-  diff (Needleman–Wunsch + move recovery)  ──►  CLI only, for now
+        └──► diff (Needleman–Wunsch + moves) ──┐        │
+                                               ▼        ▼
+                                       web UI (Jinja2, no JS)
+                                       · /runs/<id>  timeline, marked
+                                         recorded vs live on a replay
+                                       · /diff?left=&right=  aligned columns
 ```
 
-Two things that diagram gets right by having been corrected: the UI is plain
-Jinja2 with **no JavaScript**, not "Jinja2 + HTMX" as it claimed for six build
-steps — HTMX appears nowhere in the codebase and would have contradicted the
-no-JavaScript rule two paragraphs above. And the diff feeds the CLI, not the
-timeline: `flightrec diff` is the only way to see one. A diagram describing
-software that does not exist is the same failure as a number without a
-measurement.
+That diagram was wrong for six build steps and is worth keeping the correction
+visible: it said "Jinja2 + HTMX", and HTMX appears nowhere in the codebase —
+it would have contradicted the no-JavaScript rule stated two paragraphs above.
+It also drew the diff feeding the UI when the diff was command-line only, which
+was the reverse of the usual failure: the documentation described the better
+system, and the code caught up.
 
 ## Install
 

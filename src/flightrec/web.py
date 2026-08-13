@@ -105,6 +105,87 @@ class TimelineView:
         return sum(1 for step in self.steps if step.provenance == "recorded")
 
 
+@dataclass
+class DiffRowView:
+    """One column of a diff, flattened for rendering."""
+
+    op: str
+    label: str
+    left_index: int | None
+    right_index: int | None
+    left_name: str
+    right_name: str
+    left_text: str
+    right_text: str
+    moved: bool
+    genuine: bool
+
+    @property
+    def is_gap(self) -> bool:
+        return self.left_index is None or self.right_index is None
+
+
+@dataclass
+class DiffView:
+    """Two runs, aligned, ready to render."""
+
+    left_id: str
+    right_id: str
+    rows: list[DiffRowView]
+    counts: dict[str, int]
+    moved_count: int
+    identical: bool
+    divergence_index: int | None
+    left_steps: int
+    right_steps: int
+
+
+#: What each op means in a sentence, shown in the UI rather than assumed.
+#: "changed" and "replaced" look alike and are not: one says the same step
+#: returned something different, the other says it is not the same step.
+_OP_LABELS = {
+    "match": "identical",
+    "cosmetic": "reworded, same result",
+    "changed": "same step, different result",
+    "replaced": "a different step entirely",
+    "removed": "only in the left run",
+    "inserted": "only in the right run",
+}
+
+
+def build_diff(left: Run, right: Run) -> DiffView:
+    """Align two runs and flatten the result for the timeline UI."""
+    from flightrec.diff import diff_runs
+
+    diff = diff_runs(left, right)
+    rows = [
+        DiffRowView(
+            op=column.op.value,
+            label=_OP_LABELS.get(column.op.value, column.op.value),
+            left_index=column.left_index,
+            right_index=column.right_index,
+            left_name=column.left.name if column.left else "",
+            right_name=column.right.name if column.right else "",
+            left_text=_summarise(column.left) if column.left else "",
+            right_text=_summarise(column.right) if column.right else "",
+            moved=column.moved,
+            genuine=column.genuine,
+        )
+        for column in diff.columns
+    ]
+    return DiffView(
+        left_id=left.run_id,
+        right_id=right.run_id,
+        rows=rows,
+        counts={op.value: diff.count(op) for op in diff.counts},
+        moved_count=diff.moved_count,
+        identical=diff.identical,
+        divergence_index=diff.divergence_index,
+        left_steps=len(left.steps()),
+        right_steps=len(right.steps()),
+    )
+
+
 _KIND_LABELS = {
     SpanKind.LLM: "model",
     SpanKind.TOOL: "tool",

@@ -45,6 +45,21 @@
   </tbody>
 </table>
 
+{% if summaries|length > 1 %}
+{# A plain GET form: no JavaScript, linkable result, back button works. #}
+<form action="/diff" method="get" class="compare">
+  <label>Compare</label>
+  <select name="left">
+    {% for s in summaries %}<option value="{{ s.run_id }}">{{ s.run_id[:12] }}{{ ' (replay)' if s.is_replay }}</option>{% endfor %}
+  </select>
+  <label>with</label>
+  <select name="right">
+    {% for s in summaries %}<option value="{{ s.run_id }}" {{ 'selected' if loop.index == 2 }}>{{ s.run_id[:12] }}{{ ' (replay)' if s.is_replay }}</option>{% endfor %}
+  </select>
+  <button type="submit">Diff</button>
+</form>
+{% endif %}
+
 <p class="muted" style="margin-top:22px;font-size:12px">
   A run marked <span class="pill ok">ok</span> only means no step reported an
   error. It does not mean the answer was right &mdash; see any run where a tool
