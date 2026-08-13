@@ -352,11 +352,10 @@ def measure_divergence_localization(seeds: range) -> Measurement:
             "'pairing' is every surviving step, 'blame' is whether the first "
             "reported divergence is the real one (only where nothing structural "
             "happened), and 'structure' is whether added and removed steps are "
-            "reported as added and removed. Structure is the one that still "
-            "fails: adjacent-edit scores 0% because a replacement is "
-            "indistinguishable from a tool substitution, which the diff is "
-            "asked to pair. Blank columns mean the metric has no answer for "
-            "that class, not a perfect score"
+            "reported as added and removed. A blank column means the metric "
+            "has no answer for that class -- ground truth cannot decide it -- "
+            "and not a perfect score, which is why the ones that do apply "
+            "print their denominators"
         ),
     )
 
