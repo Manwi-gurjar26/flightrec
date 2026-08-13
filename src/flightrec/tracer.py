@@ -65,6 +65,13 @@ class Tracer:
         # itertools.count().__next__ is atomic in CPython, so concurrent spans
         # still get distinct, ordered sequence numbers without a lock.
         self._sequence = itertools.count()
+        self.replay_source: "ReplaySource | None" = None
+        """Set by the replay engine. ``None`` in every ordinary run.
+
+        When present, :meth:`call` asks it for a recorded result before running
+        anything. This is the whole reason :meth:`call` exists: a tracer that
+        only wraps a function can observe it, but cannot stand in for it.
+        """
 
     @contextmanager
     def span(
@@ -106,6 +113,46 @@ class Tracer:
             span.end_time = self.clock.now()
             self.sink.emit(span)
 
+    def call(
+        self,
+        name: str,
+        fn: Callable[[], Any],
+        *,
+        kind: SpanKind = SpanKind.STEP,
+        inputs: Any = None,
+        restore: Callable[[Any, Span], Any] | None = None,
+        **attributes: Any,
+    ) -> Any:
+        """Run one unit of work *through* the tracer, and record what it produced.
+
+        The difference from :meth:`span` is that the tracer invokes ``fn``
+        instead of standing around it, and that difference is the entire reason
+        replay can work for an agent this library has never seen. A wrapper can
+        watch a call; only the caller can decline to make it and hand back what
+        happened last time.
+
+        So: use ``span`` to bracket something you are running yourself, and
+        ``call`` for anything you would ever want replayed -- every model call
+        and every tool call.
+
+        ``fn`` must return something serialisable, because what comes back on a
+        replay is what was written down, not the object that produced it. Where
+        a step really returns something richer -- a model response with a tool
+        call attached -- record the readable part, put the rest on the span, and
+        pass ``restore`` to rebuild it. ``restore(value, span)`` runs on both
+        paths, so the agent gets the same type whether the step ran or not.
+        """
+        with self.span(name, kind=kind, inputs=inputs, **attributes) as span:
+            source = self.replay_source
+            if source is not None:
+                served, value = source.serve(span, name, kind, inputs)
+                if served:
+                    span.attributes[FR_OUTPUT] = _safe(value)
+                    return restore(value, span) if restore else value
+            result = fn()
+            span.attributes[FR_OUTPUT] = _safe(result)
+            return restore(result, span) if restore else result
+
     def trace(
         self,
         name: str | None = None,
@@ -124,10 +171,14 @@ class Tracer:
             @functools.wraps(func)
             def wrapper(*args: Any, **kwargs: Any) -> Any:
                 inputs = {"args": args, "kwargs": kwargs} if capture_args else None
-                with self.span(span_name, kind=kind, inputs=inputs) as span:
-                    result = func(*args, **kwargs)
-                    span.attributes[FR_OUTPUT] = _safe(result)
-                    return result
+                # Routed through call(), so a decorated tool is replayable
+                # without its author doing anything else.
+                return self.call(
+                    span_name,
+                    lambda: func(*args, **kwargs),
+                    kind=kind,
+                    inputs=inputs,
+                )
 
             return wrapper  # type: ignore[return-value]
 

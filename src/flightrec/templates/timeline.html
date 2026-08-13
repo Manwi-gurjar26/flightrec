@@ -187,10 +187,11 @@
   <div class="detail">
   {% if not view.replayable %}
     <p class="muted small">
-      This run cannot be replayed. The engine rebuilds the demo agent from the
-      seed on the root span, so a recording ingested from another agent has
-      nothing for it to reconstruct &mdash; offering the button anyway would
-      produce a plausible run that is a replay of nothing.
+      This run cannot be replayed <em>from here</em>. The engine drives any
+      agent, but a browser cannot hand the server one to drive, so this button
+      only works for agents the server can construct itself. Replaying your own
+      agent takes a few lines in your own code &mdash; see
+      <span class="mono">flightrec.replay.replay</span>.
     </p>
   {% else %}
     {# POST, not GET: a replay past the edit point executes real calls and

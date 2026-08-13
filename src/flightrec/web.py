@@ -93,13 +93,18 @@ class TimelineView:
         return "error" if self.error_count else "ok"
 
     replayable: bool = False
-    """Can the replay engine actually rebuild this run?
+    """Can *this server* rebuild the agent that produced this run?
 
-    Only the demo agent, today. ``replay_run`` reconstructs a ``ResearchAgent``
-    from the seed on the root span, so a run ingested from somebody else's agent
-    cannot be replayed -- the engine would build the wrong program and serve it
-    the recording. Offering the button anyway would be worse than not having it:
-    it would produce a plausible run that is not a replay of anything.
+    The engine is general and drives any callable -- see
+    :func:`flightrec.replay.replay`. What an HTTP request cannot do is invent
+    one: a browser has no way to hand the server a Python object, so the button
+    is limited to agents this process already knows how to construct, which
+    today means the demo. Replaying your own agent is a few lines in your own
+    code, not a change here.
+
+    Offering the button regardless would be worse than not having it: it would
+    build the wrong program, feed it this recording, and store a plausible run
+    that is a replay of nothing.
     """
 
     @property
@@ -240,12 +245,11 @@ def build_timeline(run: Run) -> TimelineView:
 
 
 def is_replayable(run: Run) -> bool:
-    """Does this recording carry what the replay engine needs to rebuild it?
+    """Can the server rebuild the agent behind this run, from the run alone?
 
-    The engine reconstructs the demo agent from the seed on the root span, so
-    the honest answer for anything else is no. Checked here rather than
-    discovered halfway through a replay, because a half-built run stored in the
-    database is harder to explain than a button that is not offered.
+    Only for agents it can construct itself, which is the demo. Checked before
+    the replay rather than discovered halfway through, because a half-built run
+    in the database is harder to explain than a button that is not offered.
     """
     for span in run.ordered_spans():
         if span.kind is SpanKind.AGENT:

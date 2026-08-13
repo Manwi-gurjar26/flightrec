@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import random
 from dataclasses import asdict, dataclass
-from typing import Any, Callable
+from typing import Any
 
-from flightrec.demo.model import ModelClient, ModelResponse, StubModel
+from flightrec.demo.model import ModelClient, ModelResponse, StubModel, ToolCall
 from flightrec.demo.tools import Fault, FaultConfig, GROUND_TRUTH, Toolbox, ToolError
 from flightrec.determinism import Clock, IdGenerator, SystemClock, RandomIdGenerator
+from flightrec.replay import ReplayedError
 from flightrec.retry import TransientError, make_rng, retry_call
 from flightrec.spans import (
     FR_OUTPUT,
@@ -74,7 +75,6 @@ class ResearchAgent:
         id_generator: IdGenerator | None = None,
         trace_id: str | None = None,
         max_steps: int = 12,
-        tool_override: Callable[[str, dict[str, Any]], Any] | None = None,
     ) -> None:
         self.seed = seed
         self.temperature = temperature
@@ -96,8 +96,6 @@ class ResearchAgent:
             id_generator=id_generator or RandomIdGenerator(),
             trace_id=trace_id,
         )
-        #: Set by the replay engine to serve recorded tool results (step 7).
-        self.tool_override = tool_override
 
     # -- the loop -------------------------------------------------------------
 
@@ -158,37 +156,49 @@ class ResearchAgent:
     # -- instrumented calls ---------------------------------------------------
 
     def _call_model(self, messages: list[dict[str, Any]]) -> ModelResponse:
-        with self.tracer.span(
+        """One model call, routed through the tracer so it can be replayed.
+
+        The step records its *text* as the output, because that is what a human
+        reads on the timeline, and puts the structured part -- the tool call it
+        asked for, the token counts -- on the span. ``restore`` rebuilds the
+        response from those two halves, and runs whether the call happened or
+        was served, so the loop below never learns which.
+        """
+
+        def complete() -> str:
+            response = self.model.complete(messages, temperature=self.temperature)
+            span = Tracer.current_span()
+            if span is not None:
+                self.tracer.record_usage(
+                    span,
+                    model=getattr(self.model, "name", None),
+                    input_tokens=response.input_tokens,
+                    output_tokens=response.output_tokens,
+                )
+                span.attributes[GEN_AI_RESPONSE_FINISH_REASONS] = [
+                    response.finish_reason
+                ]
+                if response.tool_call:
+                    span.attributes["flightrec.tool_call"] = {
+                        "name": response.tool_call.name,
+                        "arguments": response.tool_call.arguments,
+                    }
+                if response.confabulated:
+                    span.attributes[FR_CONFABULATED] = True
+            return response.text
+
+        return self.tracer.call(
             "chat",
+            complete,
             kind=SpanKind.LLM,
             inputs=messages[-1].get("content"),
+            restore=_response_from_span,
             **{
                 GEN_AI_SYSTEM: "stub",
                 GEN_AI_REQUEST_MODEL: getattr(self.model, "name", "unknown"),
                 GEN_AI_REQUEST_TEMPERATURE: self.temperature,
             },
-        ) as span:
-            response = self.model.complete(messages, temperature=self.temperature)
-            self.tracer.record_usage(
-                span,
-                model=getattr(self.model, "name", None),
-                input_tokens=response.input_tokens,
-                output_tokens=response.output_tokens,
-            )
-            span.attributes.update(
-                {
-                    GEN_AI_RESPONSE_FINISH_REASONS: [response.finish_reason],
-                    FR_OUTPUT: response.text,
-                }
-            )
-            if response.tool_call:
-                span.attributes["flightrec.tool_call"] = {
-                    "name": response.tool_call.name,
-                    "arguments": response.tool_call.arguments,
-                }
-            if response.confabulated:
-                span.attributes[FR_CONFABULATED] = True
-            return response
+        )
 
     def _call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Run a tool, recording the result -- including failure -- as an observation.
@@ -198,41 +208,33 @@ class ResearchAgent:
         itself into a wrong answer. The span is still marked as an error, so the
         timeline shows red even though the loop carried on.
         """
-        with self.tracer.span(
-            "tool." + name,
-            kind=SpanKind.TOOL,
-            inputs=arguments,
-            **{GEN_AI_TOOL_NAME: name},
-        ) as span:
-            try:
-                result = self._invoke(name, arguments, span)
-            except (ToolError, TransientError) as exc:
-                self.tracer.record_exception(span, exc)
-                span.attributes[FR_OUTPUT] = None
-                return {
-                    "role": "tool",
-                    "name": name,
-                    "arguments": arguments,
-                    "ok": False,
-                    "content": str(exc),
-                }
-
-            self.tracer.set_output(span, result)
+        try:
+            result = self.tracer.call(
+                "tool." + name,
+                lambda: self.invoke_live(name, arguments, Tracer.current_span()),
+                kind=SpanKind.TOOL,
+                inputs=arguments,
+                **{GEN_AI_TOOL_NAME: name},
+            )
+        except (ToolError, TransientError, ReplayedError) as exc:
             return {
                 "role": "tool",
                 "name": name,
                 "arguments": arguments,
-                "ok": True,
-                "content": result,
+                "ok": False,
+                "content": str(exc),
             }
 
-    def _invoke(self, name: str, arguments: dict[str, Any], span: Any) -> Any:
-        if self.tool_override is not None:
-            return self.tool_override(name, arguments)
-        return self.invoke_live(name, arguments, span)
+        return {
+            "role": "tool",
+            "name": name,
+            "arguments": arguments,
+            "ok": True,
+            "content": result,
+        }
 
     def invoke_live(self, name: str, arguments: dict[str, Any], span: Any) -> Any:
-        """Actually execute a tool. The replay engine calls this past the edit point."""
+        """Actually execute a tool. Never called for a step served from a recording."""
         if name == "web_search":
             return self.tools.web_search(str(arguments["query"]))
         if name == "calculator":
@@ -252,6 +254,26 @@ class ResearchAgent:
         if isinstance(self.tracer.sink, MemorySink):
             return self.tracer.collect()
         return Run(run_id=self.tracer.trace_id)
+
+
+def _response_from_span(text: Any, span: Any) -> ModelResponse:
+    """Rebuild a model response from what the span recorded about it.
+
+    Used on both paths, which is the point: the agent loop gets a
+    ``ModelResponse`` whether the model was called or the answer came out of a
+    recording, and so contains no replay-specific code at all.
+    """
+    call = span.attr("flightrec.tool_call")
+    reasons = span.attr(GEN_AI_RESPONSE_FINISH_REASONS) or ["stop"]
+    return ModelResponse(
+        text=str(text or ""),
+        tool_call=ToolCall(str(call["name"]), dict(call["arguments"])) if call else None,
+        input_tokens=span.input_tokens,
+        output_tokens=span.output_tokens,
+        finish_reason=str(reasons[0]),
+        model=str(span.attr(GEN_AI_REQUEST_MODEL) or "unknown"),
+        confabulated=bool(span.attr(FR_CONFABULATED)),
+    )
 
 
 def _extract_total(text: str) -> int | None:

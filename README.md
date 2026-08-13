@@ -47,9 +47,10 @@ thing*.
 
 ## What it does
 
-- **Trace.** A small SDK (one decorator, one context manager) wraps model calls and tool
-  calls and emits spans following the OpenTelemetry GenAI semantic conventions — a real
-  tracing format, not a private invention.
+- **Trace.** A small SDK wraps model calls and tool calls and emits spans following the
+  OpenTelemetry GenAI semantic conventions — a real tracing format, not a private
+  invention. Two calls to `tracer.call` is the whole integration, and it is also
+  what makes a run replayable.
 - **Store.** A FastAPI collector writes span trees to SQLite. A run is a tree, so the
   schema carries parent references.
 - **See.** A step timeline with expandable detail, prompt and response side by side, a
@@ -79,6 +80,10 @@ flightrec diff <run_a> <run_b> --by-index   # the naive pairing, for comparison
 flightrec bench                             # reproduce every number below
 ```
 
+Replaying your own agent needs no changes here &mdash; the engine drives a
+callable you supply. See `examples/replay_your_own_agent.py`, or
+[section 0](#0-to-replay-a-call-the-library-has-to-make-it).
+
 The UI is server-rendered Jinja2 with **no JavaScript and no external requests** —
 expandable steps are native `<details>` elements. The collector is a local tool that
 has to work offline, and the alternative was vendoring a JS library to reimplement a
@@ -86,11 +91,63 @@ browser primitive.
 
 ## Why this was hard
 
-*(The three sections below are the point of the project: what was tried first, why
+*(The sections below are the point of the project: what was tried first, why
 it failed, what replaced it. They are written after the fact and they are not a
 success story — several of the bugs recorded here were found by measuring
 something the tests already said was fine, and section 3 ends with two failures
 that are still failures.)*
+
+### 0. To replay a call, the library has to *make* it
+
+The engine spent five build steps able to replay exactly one agent, because
+`replay_run` constructed a `ResearchAgent`. Everything else was in place — the
+recording, the pinning, the edit point — and the entry point knew one program.
+A flight recorder that only records the aeroplane it ships with is a demo.
+
+What was in the way was smaller than it looked. The SDK wrapped calls:
+
+```python
+with tracer.span("tool.fetch", kind=SpanKind.TOOL, inputs=args):
+    result = fetch(url)          # the library never touches this line
+```
+
+A context manager can watch that call. It cannot *decline* to make it, which is
+the one thing replay needs. So there is now a form where the tracer owns the
+invocation:
+
+```python
+result = tracer.call("tool.fetch", lambda: fetch(url),
+                     kind=SpanKind.TOOL, inputs=args)
+```
+
+Same span, same attributes, one difference that changes what is possible: on a
+replay the tracer returns what happened last time and `fetch` is never called.
+`@tracer.trace` routes through it too, so a decorated tool is replayable without
+its author doing anything at all.
+
+The engine then takes a callable instead of building an agent:
+
+```python
+def run_agent(tracer, task):
+    return YourAgent(tracer=tracer).run(task)
+
+replay(recording, run_agent, from_step=7)
+```
+
+`examples/replay_your_own_agent.py` is forty lines of agent that this library
+has never seen, recorded and replayed, and a test runs it. `replay_run` is now a
+twenty-line adapter for the demo, and a test asserts the engine does not import
+the demo at all — module layout has to back the claim up, not just the docstring.
+
+**Two things a recording cannot carry, and both are load-bearing.** A step's
+return value comes back as *what was written down*, so anything replayable has to
+return something serialisable; where a step really returns something richer, record
+the readable part and pass `restore` to rebuild it from the span. And an exception
+is stored as a name and a message, never a class — so an unmapped failure replays
+as a stand-in class with the recorded name, which *records* identically but will
+not satisfy `except YourError`. Agents that branch on failure type pass
+`exceptions={"YourError": YourError}`. Getting that wrong was the first thing the
+worked example hit.
 
 ### 1. Deterministic replay: every source of variation has to be pinned
 

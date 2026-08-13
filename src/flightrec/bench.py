@@ -20,6 +20,7 @@ from typing import Any, Iterator
 
 from flightrec.demo.agent import ResearchAgent
 from flightrec.demo.tools import FaultConfig
+from flightrec import tracer as tracer_module
 from flightrec.determinism import SystemClock
 from flightrec.diff import Op, diff_runs, diff_runs_by_index
 from flightrec.replay import replay_run
@@ -845,7 +846,12 @@ def measure_replay_cost_saving(seeds: range) -> Measurement:
 
 
 class _BlankSpan:
-    """Stand-in for a span, for the uninstrumented baseline."""
+    """Stand-in for a span, for the uninstrumented baseline.
+
+    Enough surface for an agent to write to and read back within a single step,
+    and nothing else -- no validation, no serialisation, no sink. That gap is
+    exactly the cost being measured.
+    """
 
     __slots__ = ("attributes", "events", "status", "status_message")
 
@@ -854,6 +860,17 @@ class _BlankSpan:
         self.events: list[Any] = []
         self.status = None
         self.status_message = None
+
+    def attr(self, key: str, default: Any = None) -> Any:
+        return self.attributes.get(key, default)
+
+    @property
+    def input_tokens(self) -> int:
+        return int(self.attributes.get("gen_ai.usage.input_tokens", 0) or 0)
+
+    @property
+    def output_tokens(self) -> int:
+        return int(self.attributes.get("gen_ai.usage.output_tokens", 0) or 0)
 
 
 class NoOpTracer:
@@ -871,7 +888,29 @@ class NoOpTracer:
 
     @contextmanager
     def span(self, name: str, **kwargs: Any) -> Iterator[_BlankSpan]:
-        yield _BlankSpan()
+        # The real ContextVar, because instrumented code reaches for the current
+        # span through ``Tracer.current_span()`` and has to find something. An
+        # agent that silently loses its span here would take a different path
+        # from the instrumented one, and the two arms would stop comparing the
+        # same program.
+        span = _BlankSpan()
+        token = tracer_module._current_span.set(span)  # type: ignore[arg-type]
+        try:
+            yield span
+        finally:
+            tracer_module._current_span.reset(token)
+
+    def call(
+        self,
+        name: str,
+        fn: Any,
+        *,
+        restore: Any = None,
+        **kwargs: Any,
+    ) -> Any:
+        with self.span(name) as span:
+            result = fn()
+            return restore(result, span) if restore else result
 
     def record_usage(self, *args: Any, **kwargs: Any) -> None:
         pass
