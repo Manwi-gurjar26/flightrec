@@ -83,6 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     diff.set_defaults(func=_cmd_diff)
 
+    flaky = sub.add_parser(
+        "flaky", help="run a task many times and rank its steps by how much they vary"
+    )
+    flaky.add_argument("--runs", type=int, default=50, help="how many times to run it")
+    flaky.add_argument("--cities", type=int, default=2, help="task length")
+    flaky.add_argument(
+        "--faults", choices=["none", "realistic"], default="realistic"
+    )
+    flaky.add_argument("--db", help="report on stored runs instead of fresh ones")
+    flaky.set_defaults(func=_cmd_flaky)
+
     bench = sub.add_parser("bench", help="reproduce every number in the README")
     bench.add_argument("--runs", type=int, default=40, help="recordings per metric")
     bench.add_argument("--repeats", type=int, default=40, help="timing samples for overhead")
@@ -433,6 +444,57 @@ def _short(value: object, width: int = 24) -> str:
     # one into a replacement character.
     text = str(value if value is not None else "")
     return text if len(text) <= width else text[: width - 3] + "..."
+
+
+def _cmd_flaky(args: argparse.Namespace) -> int:
+    from flightrec.demo.agent import ResearchAgent
+    from flightrec.demo.tools import CITY_DAYS, FaultConfig
+    from flightrec.flaky import flaky_report, reference_run
+
+    if args.db:
+        from flightrec.storage import RunStore
+
+        store = RunStore(args.db)
+        runs = [
+            run
+            for summary in store.list_runs(limit=args.runs)
+            if (run := store.get_run(summary.run_id)) is not None
+        ]
+        store.close()
+        source = f"{len(runs)} stored run(s) from {args.db}"
+    else:
+        faults = FaultConfig.realistic() if args.faults == "realistic" else FaultConfig()
+        cities = list(CITY_DAYS)[: args.cities]
+        runs = [
+            ResearchAgent(seed=seed, faults=faults, cities=cities).run().run
+            for seed in range(args.runs)
+        ]
+        source = f"{args.runs} fresh runs, {len(cities)} cities, faults={args.faults}"
+
+    if len(runs) < 2:
+        print("need at least two runs to compare")
+        return 1
+
+    report = flaky_report(runs)
+    reference = reference_run(runs)
+
+    print(f"flaky steps over {source}")
+    print(f"aligned against a {len(reference.steps())}-step reference")
+    print()
+    for entry in report:
+        print(f"  {entry.line()}")
+
+    worst = report[0]
+    print()
+    print(
+        f"most variable: step {worst.position} ({worst.name}), "
+        f"{worst.disagreement * 100:.0f}% of runs did something other than its usual thing"
+    )
+    print(
+        "a step at 0% is settled; a high one is a coin toss the agent is "
+        "winning most of the time"
+    )
+    return 0
 
 
 def _cmd_bench(args: argparse.Namespace) -> int:

@@ -517,10 +517,13 @@ def _recover_moves(
     the way a line differ does -- in the common case there are no gaps at all.
     """
     confident: dict[int, int] = {}
+    existing: dict[int, int] = {}
     weak_left: list[int] = []
     weak_right: list[int] = []
 
     for column in columns:
+        if column.left_index is not None and column.right_index is not None:
+            existing[column.left_index] = column.right_index
         # A changed pair is not automatically in doubt. "Same tool, same
         # arguments, different result" is the diff's most valuable finding, and
         # it scores near 1.0 because similarity ignores output -- so re-opening
@@ -545,7 +548,24 @@ def _recover_moves(
     if not rescued:
         return columns
 
-    pairs = {**confident, **rescued}
+    # Start from what the alignment already found -- *including* the pairings it
+    # was unsure about -- and let rescues override individual entries.
+    #
+    # Building this from the confident pairs plus the rescues instead was a bug
+    # with a long reach: a weak pair that no rescue could improve on simply
+    # vanished, and ``_rebuild`` emitted its two steps as a removal and an
+    # insertion. Two chat steps that differ in their inputs score 0.7, below the
+    # rescue threshold, so a diff of two runs that diverged early came back
+    # claiming eight steps had been deleted and eight different ones added, when
+    # the alignment had correctly paired them all along. Being unsure about a
+    # pairing is not a reason to throw it away.
+    pairs = dict(existing)
+    for index, partner in rescued.items():
+        for holder, held in list(pairs.items()):
+            if held == partner and holder != index:
+                del pairs[holder]
+        pairs[index] = partner
+
     return _rebuild(left, right, pairs, _out_of_order(pairs))
 
 

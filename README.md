@@ -67,6 +67,9 @@ thing*.
   genuine divergence — in the browser at `/diff`, or `flightrec diff` on the
   command line. Matching steps are dimmed rather than hidden, because a run of
   quiet rows is what makes the loud ones findable.
+- **Find the flaky steps.** Run the same task fifty times and rank its steps by how
+  often each one does something other than its usual thing. A single trace cannot
+  show you that, because a single trace is one sample.
 
 ```bash
 flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
@@ -80,6 +83,7 @@ flightrec replay <run_id> --from-step 4 --strict   # stop there instead
 flightrec diff <run_a> <run_b>              # align them, find the divergence
 flightrec diff <run_a> <run_b> --by-index   # the naive pairing, for comparison
 
+flightrec flaky --runs 50                   # which steps is it getting right by luck?
 flightrec bench                             # reproduce every number below
 ```
 
@@ -615,6 +619,58 @@ one event, the two backbones are the same length, and the tie-break is arbitrary
 The tests assert the pairing, which is not ambiguous, and explicitly allow either
 labelling.
 
+### 4. The flaky-step report, and the bug it found in the diff
+
+One trace cannot tell you which steps an agent is getting right by luck, because
+one trace is one sample. Run the task fifty times and the answer falls out — but
+only if you can say which steps of one run correspond to which steps of another,
+and runs of the same task are 11, 13 or 15 steps long. Grouping by index would
+describe *where* the trouble sat rather than which step caused it, so the report
+aligns every run against a reference first and groups by correspondence.
+
+```
+flaky steps over 40 fresh runs, 2 cities, faults=realistic
+aligned against a 11-step reference
+
+  [ 8] chat               disagree  62.5%  errors   0.0%   15x "I have every figure...", 13x "That URL 404'd..."
+  [ 9] tool.calculator    disagree  62.5%  errors   0.0%   15x 296.0, 7x 290.0, 7x 293.0
+  [ 7] tool.fetch_page    disagree  45.0%  errors  32.5%   22x "Portland annual climate...", 13x ToolError: 404
+  [ 5] tool.web_search    disagree  32.5%  errors   0.0%   27x ["https://weather.example..."], 13x []
+  [ 1] tool.web_search    disagree  27.5%  errors   0.0%   29x ["https://weather.example..."], 11x []
+  [ 0] chat               disagree   0.0%  errors   0.0%   40x "I need the Seattle figure first."
+```
+
+Read bottom-up: the opening step never varies, the searches are the coin toss at
+roughly a quarter each — which is the injected `empty_search_rate` of 0.25,
+recovered from the traces alone — and the damage accumulates forwards until the
+final answer disagrees with itself in 62% of runs. The calculator never *fails*;
+it just adds up different numbers, which a report ranked by error rate would have
+missed entirely.
+
+**Building it found a real bug in the diff, of the exact kind this project keeps
+claiming to be about.** The report said reference steps were *absent* from a
+third of the runs — steps like "the final answer", which every run has. The
+alignment was fine: the monotonic pass paired all eleven steps and scored 7.159,
+optimal. Move recovery then turned that into ten gap columns.
+
+The cause was one line. `_recover_moves` puts pairings the first pass was unsure
+about into a pool, rescues what it can at similarity ≥ 0.9, and rebuilt the
+result from *the confident pairs plus the rescues* — so a weak pair that no
+rescue could improve on simply vanished, and its two steps were emitted as a
+removal and an insertion. Two chat steps whose inputs differ score 0.7. So any
+two runs that diverged early came back claiming eight steps had been deleted and
+eight different ones added, when the aligner had paired them correctly all along.
+
+Being unsure about a pairing is not a reason to throw it away. The rebuild now
+starts from every pairing the alignment found and lets rescues override
+individual entries.
+
+It had been there since move recovery landed, through four rounds of making the
+benchmark harsher, because every mutation class either rescues its weak pairs or
+does not have any — the corpus mutates *one* run, so the two sides never diverge
+the way two independent runs do. It took a feature that compares fifty unrelated
+runs to produce the input that exposed it.
+
 ## Architecture
 
 ```
@@ -891,12 +947,10 @@ using the thing, and each item is a section above rather than a bullet here:
 - [x] Four rounds of making the benchmark harsher, which found two real bugs, one
       metric blind spot, and two claims that were arithmetic rather than measurement
 - [x] An adjustable task length, and a banded alignment for the long runs it exposed
+- [x] The flaky-step report, which promptly found a bug in the diff it was built on
 
 ## What I would do with two more weeks
 
-- **Flaky-step report.** Run the same task 50 times, cluster the trajectories, and rank
-  steps by outcome variance. The high-variance steps are the ones the prompt is handling
-  by luck.
 - **Score the replay, not just reproduce it.** Attach a rubric-based scorer to each
   replayed run so "I changed step 3's prompt" produces a quality delta, not just a
   different transcript.
