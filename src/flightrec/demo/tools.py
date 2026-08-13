@@ -30,34 +30,56 @@ from flightrec.retry import TransientError
 
 # --- the fake web ------------------------------------------------------------
 
-PAGES: dict[str, str] = {
-    "https://weather.example/seattle-2024": (
-        "Seattle annual climate summary 2024. "
-        "Measurable precipitation was recorded on 152 days."
-    ),
-    "https://weather.example/portland-2024": (
-        "Portland annual climate summary 2024. "
-        "Measurable precipitation was recorded on 144 days."
-    ),
-    # Same pages, previous year. Returned by the STALE_PAGE fault. Note that
-    # these read as perfectly valid pages -- nothing downstream can tell.
-    "https://weather.example/seattle-2023": (
-        "Seattle annual climate summary 2023. "
-        "Measurable precipitation was recorded on 149 days."
-    ),
-    "https://weather.example/portland-2023": (
-        "Portland annual climate summary 2023. "
-        "Measurable precipitation was recorded on 138 days."
-    ),
+#: Rainy days per city, as (2024, 2023). The second figure is what the
+#: STALE_PAGE fault serves instead of the first.
+#:
+#: More cities than the demo task uses, so a run can be made as long as it needs
+#: to be. Each city costs an agent four steps -- decide, search, decide, fetch --
+#: and the benchmark leans on that to build corpora of very different lengths
+#: from one unchanged agent.
+CITY_DAYS: dict[str, tuple[int, int]] = {
+    "seattle": (152, 149),
+    "portland": (144, 138),
+    "boston": (127, 131),
+    "denver": (89, 94),
+    "miami": (135, 128),
+    "chicago": (125, 119),
+    "austin": (88, 91),
+    "phoenix": (36, 41),
+    "juneau": (222, 218),
+    "honolulu": (98, 104),
+    "buffalo": (167, 171),
+    "fargo": (101, 97),
 }
 
-SEARCH_INDEX: dict[str, list[str]] = {
-    "seattle": ["https://weather.example/seattle-2024"],
-    "portland": ["https://weather.example/portland-2024"],
-}
+#: The cities the demo task asks about unless told otherwise.
+DEFAULT_CITIES = ["seattle", "portland"]
 
-#: The answer a correct run produces: 152 + 144.
-GROUND_TRUTH = 296
+
+def _page(city: str, year: int, days: int) -> str:
+    return (
+        f"{city.title()} annual climate summary {year}. "
+        f"Measurable precipitation was recorded on {days} days."
+    )
+
+
+PAGES: dict[str, str] = {}
+SEARCH_INDEX: dict[str, list[str]] = {}
+for _city, (_current, _stale) in CITY_DAYS.items():
+    PAGES[f"https://weather.example/{_city}-2024"] = _page(_city, 2024, _current)
+    # Same page, previous year. Reads as perfectly valid -- nothing downstream
+    # can tell it is the wrong one, which is the point of the STALE_PAGE fault.
+    PAGES[f"https://weather.example/{_city}-2023"] = _page(_city, 2023, _stale)
+    SEARCH_INDEX[_city] = [f"https://weather.example/{_city}-2024"]
+
+
+def ground_truth(cities: list[str] | None = None) -> int:
+    """The total a correct run produces for a given set of cities."""
+    return sum(CITY_DAYS[city][0] for city in (cities or DEFAULT_CITIES))
+
+
+#: The answer a correct run of the default task produces: 152 + 144.
+GROUND_TRUTH = ground_truth()
 
 
 class Fault(str, Enum):

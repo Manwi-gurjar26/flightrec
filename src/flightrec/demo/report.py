@@ -6,14 +6,13 @@ not legible as plain text, it will not become legible by adding CSS to it.
 
 from __future__ import annotations
 
-from flightrec.demo.agent import TASK, AgentResult
-from flightrec.demo.tools import GROUND_TRUTH
+from flightrec.demo.agent import AgentResult
 from flightrec.spans import FR_OUTPUT, SpanStatus
 
 
 def format_run(result: AgentResult, seed: int, faults: str, temperature: float) -> str:
     lines = [
-        f"task:  {TASK}",
+        f"task:  {result.task}",
         f"seed:  {seed}   faults: {faults}   temp: {temperature}",
         "",
     ]
@@ -29,7 +28,7 @@ def format_run(result: AgentResult, seed: int, faults: str, temperature: float) 
 
     lines += [
         "",
-        f"answer:   {result.answer}   (correct answer: {GROUND_TRUTH})",
+        f"answer:   {result.answer}   (correct answer: {result.expected})",
         f"verdict:  {'CORRECT' if result.correct else 'WRONG'}",
         f"tokens:   {result.run.total_tokens}",
         f"faults:   {[f.value for f in result.faults_fired] or 'none fired'}",

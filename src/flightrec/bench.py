@@ -54,6 +54,14 @@ class Measurement:
     detail: str = ""
     breakdown: list[str] = field(default_factory=list)
     caveat: str = ""
+    timing: bool = False
+    """Is this a stopwatch number rather than a count?
+
+    Counts reproduce exactly on any machine, because the seeds are fixed.
+    Timings do not, and saying which is which beats leaving a reader to guess
+    from the name -- the reproducibility test used to guess, by looking for the
+    word "overhead", and silently stopped covering the next timing metric added.
+    """
 
     def format_value(self) -> str:
         return _format(self.value, self.unit)
@@ -71,6 +79,7 @@ class Measurement:
             "detail": self.detail,
             "breakdown": self.breakdown,
             "caveat": self.caveat,
+            "timing": self.timing,
         }
 
 
@@ -1246,6 +1255,7 @@ def measure_overhead(repeats: int = 40, seed: int = 1) -> Measurement:
         name="Instrumentation overhead",
         value=100.0 * added_ms / bare if bare else 0.0,
         unit="%",
+        timing=True,
         baseline=0.0,
         baseline_label="uninstrumented agent",
         detail=(
@@ -1268,6 +1278,92 @@ def measure_overhead(repeats: int = 40, seed: int = 1) -> Measurement:
     )
 
 
+# --- 6. how the diff scales -----------------------------------------------------
+
+
+@dataclass
+class ScalePoint:
+    steps: int
+    diff_ms: float
+    replay_ms: float
+
+    def line(self) -> str:
+        return (
+            f"{self.steps:>3} steps   diff {self.diff_ms:7.2f}ms   "
+            f"replay {self.replay_ms:6.2f}ms"
+        )
+
+
+def measure_scaling(city_counts: tuple[int, ...] = (2, 4, 8, 12)) -> Measurement:
+    """What a longer run costs to diff and to replay.
+
+    The demo agent takes about four steps per city it is asked about, so the
+    task is the dial for run length. Every other number here is measured on
+    11-step runs, which says nothing about an agent that takes two hundred.
+
+    Alignment is O(n*m) by construction -- that is Needleman-Wunsch, not a
+    defect -- so the useful thing to report is the constant and the shape, not
+    a pass or a fail.
+    """
+    from flightrec.demo.tools import CITY_DAYS
+
+    available = list(CITY_DAYS)
+    points = []
+
+    for count in city_counts:
+        cities = available[:count]
+        left = ResearchAgent(
+            seed=1, cities=cities, faults=FaultConfig.realistic()
+        ).run().run
+        right = ResearchAgent(
+            seed=5, cities=cities, faults=FaultConfig.realistic()
+        ).run().run
+
+        diff_samples, replay_samples = [], []
+        for _ in range(5):
+            start = time.perf_counter()
+            diff_runs(left, right)
+            diff_samples.append((time.perf_counter() - start) * 1000.0)
+            start = time.perf_counter()
+            replay_run(left)
+            replay_samples.append((time.perf_counter() - start) * 1000.0)
+
+        points.append(
+            ScalePoint(
+                steps=len(left.steps()),
+                diff_ms=min(diff_samples),
+                replay_ms=min(replay_samples),
+            )
+        )
+
+    longest, shortest = points[-1], points[0]
+    step_growth = longest.steps / shortest.steps
+    diff_growth = longest.diff_ms / shortest.diff_ms if shortest.diff_ms else 0.0
+
+    return Measurement(
+        name="Cost at length",
+        value=diff_growth,
+        unit="x",
+        timing=True,
+        baseline=step_growth,
+        baseline_label=f"growth in steps over the same range ({shortest.steps}->{longest.steps})",
+        detail=(
+            f"diffing grew {diff_growth:.1f}x while the run grew {step_growth:.1f}x, "
+            f"reaching {longest.diff_ms:.0f}ms at {longest.steps} steps; replay stayed "
+            f"linear at {longest.replay_ms:.1f}ms"
+        ),
+        breakdown=[point.line() for point in points],
+        caveat=(
+            "quadratic, and that is the algorithm rather than a bug: "
+            "Needleman-Wunsch fills an n-by-m table and each cell runs a string "
+            "similarity. It is comfortable to about a hundred steps and would "
+            "need banding -- restricting the table to a diagonal -- well before "
+            "a thousand. Nothing here has been measured against a real agent's "
+            "step counts, only against a demo whose task length is adjustable"
+        ),
+    )
+
+
 # --- the harness --------------------------------------------------------------
 
 
@@ -1279,4 +1375,5 @@ def run_bench(runs: int = DEFAULT_RUNS, repeats: int = 40) -> list[Measurement]:
         measure_divergence_localization(seeds),
         measure_replay_cost_saving(seeds),
         measure_overhead(repeats),
+        measure_scaling(),
     ]

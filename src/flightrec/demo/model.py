@@ -25,11 +25,25 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-CITIES = ["seattle", "portland"]
+from flightrec.demo.tools import CITY_DAYS, DEFAULT_CITIES
+
+CITIES = list(DEFAULT_CITIES)
 
 #: What the model "remembers" when it cannot fetch a real page. Plausible,
 #: close to the truth, and wrong -- the ingredients of a bad recovery.
-FABRICATED_PRIOR = {"seattle": 150, "portland": 140}
+#:
+#: Derived from the real figure so it stays plausible for any city the task
+#: happens to name: a few days out, never suspiciously exact.
+#:
+#: Always *under*, never alternating. The first version of this offset was
+#: +2/-2 by position, which cancels: for an even number of cities the invented
+#: total came out exactly equal to the truth, and a demo whose confabulated run
+#: gets the right answer has no failure left to demonstrate. A one-sided offset
+#: cannot sum back to the real figure however many cities are named.
+FABRICATED_PRIOR = {
+    city: current - 2 - (index % 3)
+    for index, (city, (current, _)) in enumerate(CITY_DAYS.items())
+}
 
 _DAYS = re.compile(r"recorded on (\d+) days")
 
@@ -92,8 +106,14 @@ class StubModel:
 
     name = "stub-1"
 
-    def __init__(self, rng: random.Random | None = None) -> None:
+    def __init__(
+        self, rng: random.Random | None = None, cities: list[str] | None = None
+    ) -> None:
         self._rng = rng or random.Random(0)
+        #: Which cities this task is about. Per-instance rather than a module
+        #: constant so one agent can produce runs of very different lengths --
+        #: four steps per city -- without a second agent to maintain.
+        self.cities = list(cities) if cities else list(CITIES)
 
     # -- public API -----------------------------------------------------------
 
@@ -108,6 +128,13 @@ class StubModel:
 
     # -- reading the transcript ----------------------------------------------
 
+    def _city_of(self, text: str) -> str | None:
+        lowered = text.lower()
+        for city in self.cities:
+            if city in lowered:
+                return city
+        return None
+
     def _read_transcript(self, messages: list[dict[str, Any]]) -> _Progress:
         progress = _Progress()
         for message in messages:
@@ -119,12 +146,12 @@ class StubModel:
             content = message.get("content")
 
             if name == "web_search":
-                city = _city_of(str(args.get("query", "")))
+                city = self._city_of(str(args.get("query", "")))
                 if city:
                     progress.searched[city] = list(content) if ok and content else []
             elif name == "fetch_page":
                 url = str(args.get("url", ""))
-                city = _city_of(url)
+                city = self._city_of(url)
                 if not city:
                     continue
                 progress.fetch_attempts.setdefault(city, []).append(url)
@@ -137,7 +164,7 @@ class StubModel:
     # -- the policy -----------------------------------------------------------
 
     def _decide(self, progress: _Progress, temperature: float) -> ModelResponse:
-        for city in CITIES:
+        for city in self.cities:
             if city not in progress.searched:
                 return ModelResponse(
                     text=f"I need the {city.title()} figure first. Searching.",
@@ -189,18 +216,20 @@ class StubModel:
         numbers, confabulated = self._numbers(progress)
 
         if progress.calculated is None:
-            expression = f"{numbers[CITIES[0]]} + {numbers[CITIES[1]]}"
+            expression = " + ".join(str(numbers[city]) for city in self.cities)
             return ModelResponse(
-                text=f"I have both figures. Adding them: {expression}.",
+                text=f"I have every figure. Adding them: {expression}.",
                 tool_call=ToolCall("calculator", {"expression": expression}),
                 confabulated=confabulated,
             )
 
         total = int(progress.calculated)
+        summary = ", ".join(
+            f"{city.title()} had {numbers[city]}" for city in self.cities
+        )
         return ModelResponse(
             text=(
-                f"{CITIES[0].title()} had {numbers[CITIES[0]]} days with measurable "
-                f"precipitation and {CITIES[1].title()} had {numbers[CITIES[1]]}, "
+                f"{summary} days with measurable precipitation, "
                 f"for a combined total of {total} days."
             ),
             finish_reason="stop",
@@ -211,7 +240,7 @@ class StubModel:
         """Extract each city's figure, inventing one where the page is missing."""
         numbers: dict[str, int] = {}
         confabulated = False
-        for city in CITIES:
+        for city in self.cities:
             page = progress.fetched.get(city)
             match = _DAYS.search(page) if page else None
             if match:
@@ -255,14 +284,6 @@ def _candidate_urls(city: str, results: list[str]) -> list[str]:
         f"https://weather.example/{city}-climate",
         f"https://weather.example/{city}-annual",
     ]
-
-
-def _city_of(text: str) -> str | None:
-    lowered = text.lower()
-    for city in CITIES:
-        if city in lowered:
-            return city
-    return None
 
 
 def _count_tokens(messages: list[dict[str, Any]]) -> int:

@@ -144,10 +144,11 @@ def test_every_measurement_states_its_limits() -> None:
 
 def test_the_benchmark_is_reproducible() -> None:
     """Anyone must get these numbers back, or they are not evidence of anything."""
-    first = {m.name: m.value for m in run_bench(runs=4, repeats=2) if "overhead" not in m.name.lower()}
-    second = {m.name: m.value for m in run_bench(runs=4, repeats=2) if "overhead" not in m.name.lower()}
+    first = {m.name: m.value for m in run_bench(runs=4, repeats=2) if not m.timing}
+    second = {m.name: m.value for m in run_bench(runs=4, repeats=2) if not m.timing}
 
     assert first == second
+    assert first, "every metric claiming to be a count must actually reproduce"
 
 
 # --- the mutation, which the localization number depends on -------------------
@@ -342,7 +343,7 @@ def test_cli_bench_emits_json(capsys) -> None:
     assert main(["bench", "--runs", "3", "--repeats", "2", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert len(payload) == 5
+    assert len(payload) == 6
     assert all(row["caveat"] for row in payload)
 
 

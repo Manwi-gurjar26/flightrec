@@ -310,3 +310,55 @@ def test_stub_model_is_a_pure_function_at_temperature_zero():
     one = StubModel(rng=make_rng(1)).complete(messages, temperature=0.0)
     two = StubModel(rng=make_rng(99)).complete(messages, temperature=0.0)
     assert one.tool_call.arguments == two.tool_call.arguments
+
+
+# --- run length --------------------------------------------------------------
+
+
+def test_the_task_length_is_the_dial_for_run_length():
+    """Every other measurement in this project runs on eleven steps.
+
+    A real agent takes hundreds, so the demo has to be able to say something
+    about longer runs without a second agent to maintain. Each city costs about
+    four steps -- decide, search, decide, fetch.
+    """
+    from flightrec.demo.tools import CITY_DAYS
+
+    cities = list(CITY_DAYS)
+    lengths = {
+        n: len(pinned_agent(seed=1, cities=cities[:n]).run().run.steps())
+        for n in (2, 4, 8)
+    }
+
+    assert lengths[2] == 11
+    assert lengths[4] > lengths[2] and lengths[8] > lengths[4]
+    assert lengths[8] >= 30, f"eight cities should be a long run: {lengths}"
+
+
+def test_a_longer_task_still_gets_the_right_answer():
+    from flightrec.demo.tools import CITY_DAYS, ground_truth
+
+    cities = list(CITY_DAYS)[:6]
+    result = pinned_agent(seed=1, cities=cities).run()
+
+    assert result.answer == ground_truth(cities)
+    assert result.correct
+
+
+def test_the_invented_total_can_never_equal_the_truth():
+    """The demo's whole point is that a confabulated run is *wrong*.
+
+    The first version of the fabricated prior was offset +2/-2 by position,
+    which cancels: for an even number of cities the invented total came out
+    exactly equal to the correct one, and the run that invented its data was
+    scored CORRECT. A one-sided offset cannot sum back to the real figure
+    however many cities are named.
+    """
+    from flightrec.demo.model import FABRICATED_PRIOR
+    from flightrec.demo.tools import CITY_DAYS, ground_truth
+
+    cities = list(CITY_DAYS)
+    for n in range(1, len(cities) + 1):
+        subset = cities[:n]
+        invented = sum(FABRICATED_PRIOR[city] for city in subset)
+        assert invented != ground_truth(subset), f"{n} cities: {invented}"

@@ -23,6 +23,14 @@ def build_parser() -> argparse.ArgumentParser:
     demo.add_argument("--seed", type=int, default=0)
     demo.add_argument("--temperature", type=float, default=0.0)
     demo.add_argument("--faults", choices=["none", "realistic"], default="realistic")
+    demo.add_argument(
+        "--cities",
+        type=int,
+        default=2,
+        metavar="N",
+        help="how many cities the task asks about; each one costs the agent about "
+             "four steps, so this is the dial for run length",
+    )
     demo.add_argument("--out", help="write the recording to a JSONL file")
     demo.add_argument("--db", help="also store the run in this database")
     demo.set_defaults(func=_cmd_demo)
@@ -100,11 +108,19 @@ def _cmd_demo(args: argparse.Namespace) -> int:
     memory = MemorySink()
     sink = TeeSink(memory, JSONLSink(args.out)) if args.out else memory
 
+    from flightrec.demo.tools import CITY_DAYS
+
+    available = list(CITY_DAYS)
+    if not 1 <= args.cities <= len(available):
+        print(f"--cities must be between 1 and {len(available)}")
+        return 1
+
     agent = ResearchAgent(
         seed=args.seed,
         temperature=args.temperature,
         faults=faults,
         sink=sink,
+        cities=available[: args.cities],
     )
     result = agent.run()
     result.run.spans = list(memory.spans)

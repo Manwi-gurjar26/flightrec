@@ -14,7 +14,15 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from flightrec.demo.model import ModelClient, ModelResponse, StubModel, ToolCall
-from flightrec.demo.tools import Fault, FaultConfig, GROUND_TRUTH, Toolbox, ToolError
+from flightrec.demo.tools import (
+    DEFAULT_CITIES,
+    Fault,
+    FaultConfig,
+    GROUND_TRUTH,
+    Toolbox,
+    ToolError,
+    ground_truth,
+)
 from flightrec.determinism import Clock, IdGenerator, SystemClock, RandomIdGenerator
 from flightrec.replay import ReplayedError
 from flightrec.retry import TransientError, make_rng, retry_call
@@ -31,10 +39,17 @@ from flightrec.spans import (
 from flightrec.sinks import MemorySink, Sink
 from flightrec.tracer import Tracer
 
-TASK = (
-    "How many days with measurable precipitation did Seattle and Portland "
-    "record in 2024, combined?"
-)
+def task_for(cities: list[str]) -> str:
+    """The question the demo agent is asked, for any set of cities."""
+    named = ", ".join(city.title() for city in cities[:-1])
+    joined = f"{named} and {cities[-1].title()}" if len(cities) > 1 else cities[0].title()
+    return (
+        f"How many days with measurable precipitation did {joined} "
+        f"record in 2024, combined?"
+    )
+
+
+TASK = task_for(DEFAULT_CITIES)
 
 #: Marks the step where the agent stopped being grounded in tool output.
 FR_CONFABULATED = "flightrec.confabulated"
@@ -50,10 +65,12 @@ class AgentResult:
     steps: int
     faults_fired: list[Fault]
     error: str | None = None
+    expected: int = GROUND_TRUTH
+    task: str = TASK
 
     @property
     def correct(self) -> bool:
-        return self.answer == GROUND_TRUTH
+        return self.answer == self.expected
 
     @property
     def confabulated(self) -> bool:
@@ -74,11 +91,17 @@ class ResearchAgent:
         clock: Clock | None = None,
         id_generator: IdGenerator | None = None,
         trace_id: str | None = None,
-        max_steps: int = 12,
+        max_steps: int | None = None,
+        cities: list[str] | None = None,
     ) -> None:
         self.seed = seed
         self.temperature = temperature
-        self.max_steps = max_steps
+        self.cities = list(cities) if cities else list(DEFAULT_CITIES)
+        self.expected = ground_truth(self.cities)
+        # Four steps per city, plus the calculation and the answer, plus room
+        # for every recovery to fire. Derived rather than fixed so a longer task
+        # is not silently cut off by a cap set for a two-city one.
+        self.max_steps = max_steps if max_steps is not None else 6 * len(self.cities) + 4
 
         # One seed, three independent streams. Sharing a single RNG between the
         # model and the tools would make a change in one silently shift the
@@ -87,7 +110,7 @@ class ResearchAgent:
         self._tool_rng = make_rng(seed * 7919 + 2)
         self._retry_rng = make_rng(seed * 7919 + 3)
 
-        self.model = model or StubModel(rng=self._model_rng)
+        self.model = model or StubModel(rng=self._model_rng, cities=self.cities)
         self.faults = faults or FaultConfig()
         self.tools = Toolbox(rng=self._tool_rng, faults=self.faults)
         self.tracer = Tracer(
@@ -99,7 +122,8 @@ class ResearchAgent:
 
     # -- the loop -------------------------------------------------------------
 
-    def run(self, task: str = TASK) -> AgentResult:
+    def run(self, task: str | None = None) -> AgentResult:
+        task = task if task is not None else task_for(self.cities)
         messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
         answer: int | None = None
         text = ""
@@ -142,7 +166,7 @@ class ResearchAgent:
                 error = f"{type(exc).__name__}: {exc}"
 
             self.tracer.set_output(root, {"answer": answer, "text": text})
-            root.attributes["flightrec.correct"] = answer == GROUND_TRUTH
+            root.attributes["flightrec.correct"] = answer == self.expected
 
         return AgentResult(
             run=self._collect(),
@@ -151,6 +175,8 @@ class ResearchAgent:
             steps=steps,
             faults_fired=list(self.tools.fired),
             error=error,
+            expected=self.expected,
+            task=task,
         )
 
     # -- instrumented calls ---------------------------------------------------

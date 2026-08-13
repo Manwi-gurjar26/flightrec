@@ -70,6 +70,7 @@ thing*.
 
 ```bash
 flightrec demo --seed 0 --db flightrec.db   # record a run that goes wrong
+flightrec demo --cities 12                  # a 55-step run instead of an 11-step one
 flightrec serve --db flightrec.db           # open http://127.0.0.1:8000
 
 flightrec replay <run_id>                   # reproduce it, step for step
@@ -672,12 +673,16 @@ flightrec bench --json          # machine-readable
 | **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** at the midpoint, **77%** at 90%, swept across every cut point | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~8µs per span**; under 5% once a step takes ~250µs | uninstrumented agent | < 5% wall clock | **missed on this agent** |
+| **Cost at length** | diffing grows **~16×** while the run grows 5× (11→55 steps) | growth in steps | — | quadratic, by design |
 
 The first four are exact and reproduce on any machine — they are counts, and the
-seeds are fixed. The overhead row is a timing measurement and moves by a few
-percent between runs and considerably more between machines; it is quoted with a
-`~` for that reason rather than to round it in a flattering direction, and the
-harness prints the observed range alongside it.
+seeds are fixed. The last two are timing measurements and move by a few percent
+between runs and considerably more between machines; they are quoted with a `~`
+for that reason rather than to round them in a flattering direction, and the
+harness prints the observed range alongside. Each measurement says which it is
+rather than leaving a reader to infer it from the name — the reproducibility test
+used to infer it, by looking for the word "overhead", and silently stopped
+covering the next timing metric that was added.
 
 Five things these numbers do not say, in descending order of how much they matter:
 
@@ -767,6 +772,26 @@ curve upwards at the long end, where the fixed cost should be vanishing.
 Cost is dominated by span validation and UUID generation. Both are deliberate,
 and one tempting fix is not one: `Span.model_construct`, which skips pydantic
 validation, measured **125× slower** than the validated path.
+
+**Nothing here is measured on a long run, and that is the largest gap left.**
+The demo agent takes about four steps per city it is asked about, so
+`flightrec demo --cities 8` produces a 35-step run and `--cities 12` a 55-step
+one. Every other number on this page comes from the 11-step default. Stretching
+the task turned up the one scaling fact worth stating plainly: **alignment is
+quadratic.** Diffing grows ~16× while the run grows 5×, reaching 65ms at 55
+steps, while replay stays linear at 2ms.
+
+```
+ 11 steps   diff    4.12ms   replay   1.04ms
+ 19 steps   diff    6.29ms   replay   1.03ms
+ 35 steps   diff   28.71ms   replay   1.31ms
+ 55 steps   diff   65.23ms   replay   2.00ms
+```
+
+That is Needleman–Wunsch, not a defect: an n-by-m table with a string similarity
+in every cell. It is comfortable to about a hundred steps and would need banding
+— restricting the table to a diagonal — well before a thousand. Worth knowing
+before pointing this at an agent that loops.
 
 **The replay saving is smaller than "skip half the steps" suggests, and it is
 not a straight line.** A model call's prompt carries the whole transcript so far,
