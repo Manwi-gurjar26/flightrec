@@ -548,3 +548,114 @@ def test_the_worked_example_still_works() -> None:
     spec.loader.exec_module(module)
 
     module.main()  # must not raise
+
+
+# --- the span/call gap --------------------------------------------------------
+
+
+class WrappedAgent:
+    """An agent that brackets its tool call instead of routing it through call().
+
+    A completely reasonable-looking way to instrument something, and one the
+    engine cannot serve: a context manager wraps a block it does not control.
+    """
+
+    def __init__(self, tracer, use_call: bool = False) -> None:
+        self.tracer = tracer
+        self.use_call = use_call
+        self.executed: list[str] = []
+
+    def _lookup(self, key: str) -> str:
+        self.executed.append(key)
+        return f"value for {key}"
+
+    def run(self, task: str) -> str:
+        from flightrec.spans import FR_OUTPUT, SpanKind
+
+        with self.tracer.span("wrapped_agent", kind=SpanKind.AGENT, inputs=task):
+            if self.use_call:
+                return self.tracer.call(
+                    "tool.lookup",
+                    lambda: self._lookup(task),
+                    kind=SpanKind.TOOL,
+                    inputs={"key": task},
+                )
+            with self.tracer.span(
+                "tool.lookup", kind=SpanKind.TOOL, inputs={"key": task}
+            ) as span:
+                result = self._lookup(task)
+                span.attributes[FR_OUTPUT] = result
+                return result
+
+
+def record_wrapped(use_call: bool = False):
+    from flightrec.sinks import MemorySink
+    from flightrec.tracer import Tracer
+
+    tracer = Tracer(sink=MemorySink(), trace_id="wrapped")
+    agent = WrappedAgent(tracer, use_call=use_call)
+    agent.run("alpha")
+    return tracer.collect()
+
+
+def test_a_span_wrapped_tool_call_is_refused_not_quietly_run() -> None:
+    """The silent-partial-replay hole, closed.
+
+    ``span`` cannot be served, so the step runs for real in the middle of a
+    supposed reproduction *and* leaves its recorded counterpart queued for
+    whatever asks next. Both halves are wrong and neither announced itself.
+    """
+    from flightrec.replay import ReplayGap, replay
+
+    recording = record_wrapped(use_call=False)
+
+    with pytest.raises(ReplayGap) as caught:
+        replay(recording, lambda t, task: WrappedAgent(t).run(task))
+
+    message = str(caught.value)
+    assert "tool.lookup" in message
+    assert "tracer.call" in message, "the error has to say what to do about it"
+
+
+def test_the_same_agent_replays_once_it_uses_call() -> None:
+    """And the fix works, which is what makes the refusal fair."""
+    from flightrec.replay import replay
+
+    recording = record_wrapped(use_call=True)
+    seen = {}
+
+    def run_agent(tracer, task):
+        agent = WrappedAgent(tracer, use_call=True)
+        seen["it"] = agent
+        return agent.run(task)
+
+    result = replay(recording, run_agent)
+
+    assert result.faithful
+    assert seen["it"].executed == [], "the tool must not have run"
+
+
+def test_structural_spans_are_not_mistaken_for_the_gap() -> None:
+    """The agent wrapper is a ``span`` and always will be.
+
+    Only model and tool steps can be served, so bracketing the run itself -- or
+    a loop iteration -- has to stay ordinary. Flagging those would make the
+    check fire on every correctly written agent.
+    """
+    from flightrec.replay import replay
+
+    recording = record_wrapped(use_call=True)
+    result = replay(recording, lambda t, task: WrappedAgent(t, use_call=True).run(task))
+
+    assert result.faithful
+
+
+def test_a_span_wrapped_step_past_the_edit_point_is_fine() -> None:
+    """Past the cut everything runs live by design, so there is nothing to serve."""
+    from flightrec.replay import replay
+
+    recording = record_wrapped(use_call=False)
+
+    result = replay(recording, lambda t, task: WrappedAgent(t).run(task), from_step=0)
+
+    assert result.live > 0 or result.served == 0

@@ -139,6 +139,30 @@ has never seen, recorded and replayed, and a test runs it. `replay_run` is now a
 twenty-line adapter for the demo, and a test asserts the engine does not import
 the demo at all — module layout has to back the claim up, not just the docstring.
 
+**The half of that split which stayed dangerous.** `span` still exists, still
+cannot be served, and is still the natural thing to reach for. An agent that
+brackets its tool call with it replays *part live*: the step runs for real in the
+middle of a supposed reproduction, and its recorded counterpart stays queued for
+whichever call asks next — so the run is simultaneously executing things it
+should not and serving the wrong answers to everything after. Neither half
+announced itself. That is the precise shape of bug this project exists to catch,
+sitting inside the tool.
+
+It is now an error naming the step and the fix:
+
+```
+ReplayGap: 1 step(s) ran for real during this replay because they are
+instrumented with tracer.span, which cannot be served from a recording:
+tool.lookup. Wrap them with tracer.call(name, fn, kind=...) -- or
+@tracer.trace -- so the engine can answer them.
+```
+
+Only where it matters: structural spans (the agent wrapper, a loop iteration)
+are never servable and never flagged, and neither is a step past the edit point,
+where running live is the whole point. The check asks whether the recording
+still had something it could have answered — the first version asked whether the
+replay had gone live yet, which reported a gap on every run cut at step 0.
+
 **Two things a recording cannot carry, and both are load-bearing.** A step's
 return value comes back as *what was written down*, so anything replayable has to
 return something serialisable; where a step really returns something richer, record

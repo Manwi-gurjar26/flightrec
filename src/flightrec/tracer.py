@@ -41,6 +41,11 @@ _current_span: ContextVar[Span | None] = ContextVar("flightrec_current_span", de
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+#: Kinds a recording can answer for. Everything else -- the agent wrapper, a
+#: loop iteration -- is structure the agent re-executes anyway, so opening one
+#: through ``span`` during a replay is ordinary and says nothing.
+_REPLAYABLE_KINDS = (SpanKind.LLM, SpanKind.TOOL)
+
 
 class Tracer:
     """Creates spans and hands finished ones to a sink."""
@@ -79,12 +84,22 @@ class Tracer:
         name: str,
         kind: SpanKind = SpanKind.STEP,
         inputs: Any = None,
+        _invoked: bool = False,
         **attributes: Any,
     ) -> Iterator[Span]:
         """Record a unit of work.
 
         The yielded span is mutable: set ``flightrec.output`` or token counts on
         it from inside the block via :meth:`set_output` / ``span.attributes``.
+
+        **This form cannot be replayed**, and during a replay it says so rather
+        than pretending. A context manager wraps a block it does not control, so
+        there is no way for it to return a recorded result instead of running
+        the code -- see :meth:`call`, which exists for exactly that. Use ``span``
+        to bracket work you are running yourself; use ``call`` for anything that
+        talks to a model or a tool.
+
+        ``_invoked`` is set by :meth:`call` and is not part of the public API.
         """
         parent = _current_span.get()
         span = Span(
@@ -99,6 +114,17 @@ class Tracer:
         )
         if inputs is not None:
             span.attributes[FR_INPUT] = _safe(inputs)
+
+        # A model or tool call opened through ``span`` during a replay is about
+        # to run for real while the recording sits there unread -- and, worse,
+        # leave its recorded step at the front of the queue to be handed to some
+        # later call. That is a replay that is quietly part live, which is the
+        # failure this whole project is against. The engine is told, and stops.
+        source = self.replay_source
+        if source is not None and not _invoked and kind in _REPLAYABLE_KINDS:
+            note = getattr(source, "note_unreplayable", None)
+            if note is not None:
+                note(name, kind)
 
         token = _current_span.set(span)
         try:
@@ -142,7 +168,9 @@ class Tracer:
         pass ``restore`` to rebuild it. ``restore(value, span)`` runs on both
         paths, so the agent gets the same type whether the step ran or not.
         """
-        with self.span(name, kind=kind, inputs=inputs, **attributes) as span:
+        with self.span(
+            name, kind=kind, inputs=inputs, _invoked=True, **attributes
+        ) as span:
             source = self.replay_source
             if source is not None:
                 served, value = source.serve(span, name, kind, inputs)

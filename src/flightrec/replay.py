@@ -70,6 +70,21 @@ class ReplayStopped(RuntimeError):
     """Raised in ``strict`` mode when the replay reaches the edit point."""
 
 
+class ReplayGap(ReplayMismatch):
+    """A step the recording could have answered was executed for real instead.
+
+    Raised when a model or tool call is instrumented with ``tracer.span``
+    rather than ``tracer.call``. The context manager form cannot be served --
+    it wraps a block it does not control -- so that step runs live in the middle
+    of what is supposed to be a reproduction, and leaves its recorded
+    counterpart queued for whichever call asks next.
+
+    That combination is the worst case: a replay that is part live, part
+    misaligned, and reports neither. So it is an error with the fix in the
+    message, rather than a warning nobody reads.
+    """
+
+
 class ReplayedError(RuntimeError):
     """Stands in for a failure the recording describes but cannot reconstruct.
 
@@ -163,6 +178,30 @@ class Recording(ReplaySource):
         for index, span in enumerate(run.steps()):
             self._steps.setdefault(span.kind, []).append((index, span))
         self._cursors: dict[SpanKind, int] = {}
+        self.unreplayable: list[tuple[str, SpanKind]] = []
+
+    def note_unreplayable(self, name: str, kind: SpanKind) -> None:
+        """The tracer opened a servable step through ``span`` instead of ``call``.
+
+        Counted only when the recording still had something it could have
+        answered. Past the edit point everything runs live by design, and a
+        replay cut at step 0 has nothing to serve at all -- flagging those would
+        be reporting a gap where no recorded step was going unused.
+        """
+        if self._servable_remaining():
+            self.unreplayable.append((name, kind))
+
+    def _servable_remaining(self) -> bool:
+        """Is there an unconsumed recorded step this replay would still serve?"""
+        if self.cutover.gone_live:
+            return False
+        limit = self.cutover.from_step
+        for kind, steps in self._steps.items():
+            cursor = self._cursors.get(kind, 0)
+            for index, _ in steps[cursor:]:
+                if limit is None or index < limit:
+                    return True
+        return False
 
     def serve(
         self, span: Span, name: str, kind: SpanKind, inputs: Any
@@ -349,6 +388,17 @@ def replay(
     # test -- so a mismatch would otherwise end up as a string in their result.
     if recording.cutover.mismatch is not None:
         raise recording.cutover.mismatch
+
+    if recording.unreplayable:
+        names = ", ".join(sorted({name for name, _ in recording.unreplayable}))
+        raise ReplayGap(
+            f"{len(recording.unreplayable)} step(s) ran for real during this "
+            f"replay because they are instrumented with tracer.span, which "
+            f"cannot be served from a recording: {names}. Wrap them with "
+            f"tracer.call(name, fn, kind=...) -- or @tracer.trace -- so the "
+            f"engine can answer them. Until then this would be a replay with "
+            f"live steps in the middle of it, reported as a reproduction."
+        )
 
     replayed = Run(run_id=tracer.trace_id, spans=list(sink.spans))
     _mark(replayed, from_step)
