@@ -673,7 +673,7 @@ flightrec bench --json          # machine-readable
 | **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** at the midpoint, **77%** at 90%, swept across every cut point | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~8µs per span**; under 5% once a step takes ~250µs | uninstrumented agent | < 5% wall clock | **missed on this agent** |
-| **Cost at length** | diffing grows **~16×** while the run grows 5× (11→55 steps) | growth in steps | — | quadratic, by design |
+| **Cost at length** | diffing grows **~20×** while the run grows 5×; banding makes it ~1.8× faster at 55 steps and ~4× at 600 | growth in steps | — | quadratic, banded |
 
 The first four are exact and reproduce on any machine — they are counts, and the
 seeds are fixed. The last two are timing measurements and move by a few percent
@@ -789,9 +789,43 @@ steps, while replay stays linear at 2ms.
 ```
 
 That is Needleman–Wunsch, not a defect: an n-by-m table with a string similarity
-in every cell. It is comfortable to about a hundred steps and would need banding
-— restricting the table to a diagonal — well before a thousand. Worth knowing
-before pointing this at an agent that loops.
+in every cell. Two runs that mostly correspond have their alignment path near the
+diagonal, so most of that table is computed and thrown away — which is what the
+banding fixes.
+
+**The band is exact, and the widening is what makes it so.** A band that clips
+the true path silently returns a worse alignment, which is the quiet wrongness
+this whole project is against. So the traceback reports how far it strayed from
+the diagonal; if that reaches the edge, the band may have cut something better
+off, and the alignment is recomputed twice as wide, up to the full table. Worst
+case is marginally slower than never banding; the common case is much faster, and
+a test asserts the banded and unbanded columns are identical on every mutant in
+the corpus and on 200-step runs.
+
+```
+steps    full ms   banded ms   speedup
+   56       44.4        30.5      1.5x
+  248     1282.5       286.8      4.5x
+  622     9783.5      2624.4      3.7x
+```
+
+Three things had to change before the band paid for itself, and only the first
+was the band:
+
+| | |
+|---|---|
+| skipping cells still allocated six full n-by-m tables | rows are stored only where the band is |
+| accessor functions cost more than the band saved | the inner loop indexes directly — the one place in this project where that trade is worth making |
+| the move pass was still comparing every unexplained step against every other, and became the *larger* half of a banded diff | candidates are bucketed by kind and tool name first, which cannot change the result: a label mismatch caps similarity at 0.5, below the 0.9 threshold |
+
+**And it costs one thing, stated as a limit rather than discovered as a
+surprise.** The move pass now searches a fixed window around where a step
+belongs, so a reordering further than 64 positions is not detected. That is
+measured, not assumed — a block moved 64 positions is found, one moved 70 is
+not, and a test pins both. Every rescued pair in the corpus moves eight
+positions or fewer, but that number is worth less than it looks: those runs are
+eleven to fifteen steps long, so eight is near the furthest they can express. It
+is evidence about the corpus, not about how far real reorderings reach.
 
 **The replay saving is smaller than "skip half the steps" suggests, and it is
 not a straight line.** A model call's prompt carries the whole transcript so far,

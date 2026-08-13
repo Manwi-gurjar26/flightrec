@@ -606,3 +606,106 @@ def test_a_recording_diffed_against_its_own_replay_is_identical() -> None:
     replayed = replay_run(recorded).run
 
     assert diff_runs(recorded, replayed).identical
+
+
+# --- banding ------------------------------------------------------------------
+
+
+def long_pair(steps: int = 120):
+    """Two long runs built by chaining recordings, for the banding tests."""
+    from flightrec.demo.agent import ResearchAgent
+    from flightrec.demo.tools import CITY_DAYS
+
+    cities = list(CITY_DAYS)[:6]
+
+    def build(first_seed: int, label: str) -> Run:
+        spans = []
+        seed = first_seed
+        while len(spans) < steps:
+            run = ResearchAgent(
+                seed=seed, cities=cities, faults=FaultConfig.realistic()
+            ).run().run
+            for span in run.steps():
+                copy = span.model_copy(deep=True)
+                copy.sequence = len(spans)
+                copy.span_id = f"{label}-{len(spans)}"
+                copy.parent_span_id = None
+                spans.append(copy)
+            seed += 1
+        return Run(run_id=label, spans=spans)
+
+    return build(1, "left"), build(41, "right")
+
+
+def columns_of(left, right, banded):
+    return [
+        (c.op, c.left_index, c.right_index, c.moved)
+        for c in align(left.steps(), right.steps(), banded=banded)
+    ]
+
+
+def test_banding_returns_exactly_what_the_full_table_would() -> None:
+    """The point of the widening: banding is a speed-up, not an approximation.
+
+    A band that clips the true path returns a worse alignment and says nothing,
+    which is the quiet wrongness this project exists to avoid. So the traceback
+    reports how far it strayed, and a path that reaches the edge is recomputed
+    twice as wide.
+    """
+    left, right = long_pair()
+
+    assert columns_of(left, right, True) == columns_of(left, right, False)
+
+
+def test_banding_is_faster_on_a_long_run() -> None:
+    """Otherwise it is complexity with nothing bought."""
+    import time
+
+    left, right = long_pair(steps=200)
+
+    def elapsed(banded: bool) -> float:
+        best = float("inf")
+        for _ in range(3):
+            start = time.perf_counter()
+            align(left.steps(), right.steps(), banded=banded)
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    assert elapsed(True) < elapsed(False)
+
+
+def test_short_runs_skip_the_band_entirely() -> None:
+    """Below the threshold the retry can only cost time, so it is not attempted."""
+    left = make_run(CLEAN)
+    right = make_run(CLEAN[:3] + RETRY_BLOCK + CLEAN[3:], run_id="b")
+
+    assert columns_of(left, right, True) == columns_of(left, right, False)
+
+
+def test_a_reordering_beyond_the_move_window_is_not_found() -> None:
+    """The one real limit banding introduced, pinned as a limit.
+
+    The move pass looks within a fixed window of where a step belongs, because
+    searching the whole run for every unexplained step is quadratic. A block
+    moved 64 positions is still found; one moved 70 is not, and a reader
+    deserves to know that from a test rather than from a surprise.
+    """
+    from flightrec.diff import _MOVE_WINDOW
+
+    left, _ = long_pair(steps=200)
+    steps = left.steps()
+
+    def moved_by(distance: int) -> bool:
+        copies = [s.model_copy(deep=True) for s in steps]
+        block, rest = copies[10:12], copies[:10] + copies[12:]
+        target = 10 + distance
+        reordered = rest[:target] + block + rest[target:]
+        for index, span in enumerate(reordered):
+            span.sequence = index
+            span.span_id = f"r-{index}"
+        return any(
+            c.moved for c in align(steps, Run(run_id="r", spans=reordered).steps())
+        )
+
+    assert moved_by(_MOVE_WINDOW)
+    assert not moved_by(_MOVE_WINDOW + 6)

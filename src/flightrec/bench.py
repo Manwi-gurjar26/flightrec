@@ -1285,12 +1285,13 @@ def measure_overhead(repeats: int = 40, seed: int = 1) -> Measurement:
 class ScalePoint:
     steps: int
     diff_ms: float
+    full_ms: float
     replay_ms: float
 
     def line(self) -> str:
         return (
             f"{self.steps:>3} steps   diff {self.diff_ms:7.2f}ms   "
-            f"replay {self.replay_ms:6.2f}ms"
+            f"(unbanded {self.full_ms:8.2f}ms)   replay {self.replay_ms:6.2f}ms"
         )
 
 
@@ -1319,11 +1320,14 @@ def measure_scaling(city_counts: tuple[int, ...] = (2, 4, 8, 12)) -> Measurement
             seed=5, cities=cities, faults=FaultConfig.realistic()
         ).run().run
 
-        diff_samples, replay_samples = [], []
+        diff_samples, full_samples, replay_samples = [], [], []
         for _ in range(5):
             start = time.perf_counter()
             diff_runs(left, right)
             diff_samples.append((time.perf_counter() - start) * 1000.0)
+            start = time.perf_counter()
+            diff_runs(left, right, banded=False)
+            full_samples.append((time.perf_counter() - start) * 1000.0)
             start = time.perf_counter()
             replay_run(left)
             replay_samples.append((time.perf_counter() - start) * 1000.0)
@@ -1332,6 +1336,7 @@ def measure_scaling(city_counts: tuple[int, ...] = (2, 4, 8, 12)) -> Measurement
             ScalePoint(
                 steps=len(left.steps()),
                 diff_ms=min(diff_samples),
+                full_ms=min(full_samples),
                 replay_ms=min(replay_samples),
             )
         )
@@ -1339,6 +1344,7 @@ def measure_scaling(city_counts: tuple[int, ...] = (2, 4, 8, 12)) -> Measurement
     longest, shortest = points[-1], points[0]
     step_growth = longest.steps / shortest.steps
     diff_growth = longest.diff_ms / shortest.diff_ms if shortest.diff_ms else 0.0
+    saved = longest.full_ms / longest.diff_ms if longest.diff_ms else 1.0
 
     return Measurement(
         name="Cost at length",
@@ -1349,17 +1355,21 @@ def measure_scaling(city_counts: tuple[int, ...] = (2, 4, 8, 12)) -> Measurement
         baseline_label=f"growth in steps over the same range ({shortest.steps}->{longest.steps})",
         detail=(
             f"diffing grew {diff_growth:.1f}x while the run grew {step_growth:.1f}x, "
-            f"reaching {longest.diff_ms:.0f}ms at {longest.steps} steps; replay stayed "
-            f"linear at {longest.replay_ms:.1f}ms"
+            f"reaching {longest.diff_ms:.0f}ms at {longest.steps} steps -- "
+            f"{saved:.1f}x faster than filling the whole table, and identical to it; "
+            f"replay stayed linear at {longest.replay_ms:.1f}ms"
         ),
         breakdown=[point.line() for point in points],
         caveat=(
-            "quadratic, and that is the algorithm rather than a bug: "
-            "Needleman-Wunsch fills an n-by-m table and each cell runs a string "
-            "similarity. It is comfortable to about a hundred steps and would "
-            "need banding -- restricting the table to a diagonal -- well before "
-            "a thousand. Nothing here has been measured against a real agent's "
-            "step counts, only against a demo whose task length is adjustable"
+            "still quadratic in the worst case, because Needleman-Wunsch fills "
+            "an n-by-m table and each cell runs a string similarity. The band "
+            "keeps the constant down rather than changing the complexity, and "
+            "it widens until it stops binding, so the result is exactly what "
+            "the full table gives -- a speed-up, not an approximation. What it "
+            "does cost is a fixed limit on how far a reordering can be detected "
+            "(see _MOVE_WINDOW). Nothing here has been measured against a real "
+            "agent's step counts, only against a demo whose task length is "
+            "adjustable"
         ),
     )
 

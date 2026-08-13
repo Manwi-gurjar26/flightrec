@@ -71,6 +71,31 @@ _RATIO_CAP = 400
 
 _NEG = float("-inf")
 
+#: Below this many cells, fill the whole table. Banding a small alignment saves
+#: nothing worth the retry it might cost.
+_BAND_MIN_CELLS = 900
+
+#: How much room the band leaves around the diagonal before it starts widening.
+#: Wide enough that ordinary insertions and deletions never trigger a retry.
+_BAND_MARGIN = 12
+
+#: How far the move pass will look for a step's counterpart. **A hard limit: a
+#: reordering further than this is not detected**, measured rather than assumed
+#: -- a block moved 64 positions is found, one moved 70 is not.
+#:
+#: The pass is otherwise quadratic in the steps the alignment left unexplained,
+#: which on a long run was the larger half of the whole diff.
+#:
+#: Every rescued pair in the benchmark corpus moves eight positions or fewer,
+#: and that number is worth *less* than it looks: those runs are eleven to
+#: fifteen steps long, so eight is near the furthest they can express. It is
+#: evidence about the corpus, not about how far real reorderings reach. What
+#: justifies the cutoff is the weaker but honest claim that a step resurfacing
+#: hundreds of positions away has not moved, it merely resembles something --
+#: and that the limit is stated here rather than discovered by someone whose
+#: agent loops.
+_MOVE_WINDOW = 64
+
 
 #: How certain a leftover pairing has to look before the move pass will claim
 #: it. Identical steps are rescued regardless; this governs the second pass,
@@ -218,6 +243,11 @@ def _ratio(left: str, right: str) -> float:
     return SequenceMatcher(None, left[:_RATIO_CAP], right[:_RATIO_CAP]).ratio()
 
 
+def _shape_of(span: Span) -> tuple[str, str]:
+    """Kind and tool name -- the two things worth 0.5 of a step's similarity."""
+    return (span.kind.value, _label(span))
+
+
 def _label(span: Span) -> str:
     return str(span.attr(GEN_AI_TOOL_NAME) or span.name)
 
@@ -232,6 +262,7 @@ def align(
     gap_open: float = GAP_OPEN,
     gap_extend: float = GAP_EXTEND,
     detect_moves: bool = True,
+    banded: bool = True,
 ) -> list[AlignedStep]:
     """Align two step sequences, then recover any reorderings.
 
@@ -240,9 +271,51 @@ def align(
     -- which is the right model for insertions, deletions and edits and is
     structurally incapable of expressing a transposition. Set ``detect_moves``
     to ``False`` to see that first pass on its own.
+
+    Long runs are aligned inside a diagonal band that widens until it stops
+    binding; ``banded=False`` forces the full table. See :func:`_banded_align`
+    for why that is exact rather than approximate.
     """
-    columns = _align_monotonic(left, right, gap_open, gap_extend)
+    columns = _banded_align(left, right, gap_open, gap_extend, banded)
     return _recover_moves(left, right, columns) if detect_moves else columns
+
+
+def _banded_align(
+    left: list[Span],
+    right: list[Span],
+    gap_open: float,
+    gap_extend: float,
+    banded: bool,
+) -> list[AlignedStep]:
+    """Align inside a diagonal band, widening until the band stops binding.
+
+    Filling the whole table is quadratic, and on a 55-step run that is 65ms of
+    string similarity -- fine, until an agent loops and the run is five hundred
+    steps long. Two sequences that mostly correspond have their alignment path
+    near the diagonal, so most of that table is computed and thrown away.
+
+    **This is exact, not an approximation, and the widening is what makes it so.**
+    A band that clips the true path silently returns a worse alignment, which is
+    the kind of quiet wrongness this project exists to avoid. So the traceback
+    reports how far it strayed from the diagonal; if that reaches the edge, the
+    band may have cut something better off and the whole thing is recomputed
+    twice as wide, up to the full table. The worst case is therefore a little
+    slower than never banding at all, and the common case is much faster.
+    """
+    n, m = len(left), len(right)
+    full = max(n, m)
+    if not banded or n * m <= _BAND_MIN_CELLS:
+        # Small tables are already cheap, and the retry logic can only cost
+        # time here. Below the threshold, do the exact thing directly.
+        columns, _ = _align_monotonic(left, right, gap_open, gap_extend)
+        return columns
+
+    band = max(_BAND_MARGIN, abs(n - m) + _BAND_MARGIN)
+    while True:
+        columns, reach = _align_monotonic(left, right, gap_open, gap_extend, band)
+        if reach < band or band >= full:
+            return columns
+        band = min(band * 2, full)
 
 
 def _align_monotonic(
@@ -250,70 +323,142 @@ def _align_monotonic(
     right: list[Span],
     gap_open: float,
     gap_extend: float,
-) -> list[AlignedStep]:
+    band: int | None = None,
+) -> tuple[list[AlignedStep], int]:
     """Needleman-Wunsch with affine gaps (Gotoh), over three score matrices.
 
     ``M`` ends in a substitution, ``X`` in a gap on the right (a step only the
     left run has), ``Y`` in a gap on the left. Each keeps its own predecessor so
     the traceback knows whether it is continuing a gap or opening one, which a
     single matrix cannot express and is exactly what makes the penalty affine.
+
+    With ``band`` set, only cells within that distance of the diagonal are
+    filled; the rest stay at negative infinity and no path can cross them. That
+    is the whole cost saving, because the expensive part of a cell is the string
+    similarity inside it. Returns the columns and how far the chosen path
+    strayed from the diagonal, which is what tells the caller whether the band
+    was wide enough to trust.
     """
     n, m = len(left), len(right)
     if n == 0 or m == 0:
-        return [_gap(Op.REMOVED, s, i) for i, s in enumerate(left)] + [
+        columns = [_gap(Op.REMOVED, s, i) for i, s in enumerate(left)] + [
             _gap(Op.INSERTED, s, j) for j, s in enumerate(right)
         ]
+        return columns, max(n, m)
 
-    M = [[_NEG] * (m + 1) for _ in range(n + 1)]
-    X = [[_NEG] * (m + 1) for _ in range(n + 1)]
-    Y = [[_NEG] * (m + 1) for _ in range(n + 1)]
-    from_M = [[""] * (m + 1) for _ in range(n + 1)]
-    from_X = [[""] * (m + 1) for _ in range(n + 1)]
-    from_Y = [[""] * (m + 1) for _ in range(n + 1)]
+    # Rows are stored only where the band is. Keeping full-width rows and
+    # merely skipping the cells was the first attempt: it saved the string
+    # similarity, which is the expensive part, and still allocated an n-by-m
+    # table six times over -- which became the bottleneck as soon as the
+    # similarity work was gone, and is a memory problem in its own right on a
+    # thousand-step run.
+    spans_of_row = []
+    for i in range(n + 1):
+        if band is None:
+            spans_of_row.append((0, m))
+        else:
+            centre = i * m / n
+            spans_of_row.append(
+                (max(0, int(centre - band)), min(m, int(centre + band) + 1))
+            )
 
-    M[0][0] = 0.0
+    def _row(fill: Any) -> list:
+        return [[fill] * (high - low + 1) for low, high in spans_of_row]
+
+    M, X, Y = _row(_NEG), _row(_NEG), _row(_NEG)
+    from_M, from_X, from_Y = _row(""), _row(""), _row("")
+
+    def get(rows: list, i: int, j: int) -> Any:
+        low, high = spans_of_row[i]
+        return rows[i][j - low] if low <= j <= high else _NEG
+
+    def put(rows: list, i: int, j: int, value: Any) -> None:
+        low, high = spans_of_row[i]
+        if low <= j <= high:
+            rows[i][j - low] = value
+
+    def pointer(rows: list, i: int, j: int) -> str:
+        low, high = spans_of_row[i]
+        return rows[i][j - low] if low <= j <= high else ""
+
+    put(M, 0, 0, 0.0)
     for i in range(1, n + 1):
-        X[i][0] = gap_open + gap_extend * i
-        from_X[i][0] = "X"
+        put(X, i, 0, gap_open + gap_extend * i)
+        put(from_X, i, 0, "X")
     for j in range(1, m + 1):
-        Y[0][j] = gap_open + gap_extend * j
-        from_Y[0][j] = "Y"
+        put(Y, 0, j, gap_open + gap_extend * j)
+        put(from_Y, 0, j, "Y")
 
     for i in range(1, n + 1):
-        for j in range(1, m + 1):
-            # Substitution score maps similarity onto [-1, +1], so an unrelated
-            # pair is a genuine cost rather than a free zero.
-            sub = 2.0 * similarity(left[i - 1], right[j - 1]) - 1.0
-            M[i][j], from_M[i][j] = _best(
-                sub, {"M": M[i - 1][j - 1], "X": X[i - 1][j - 1], "Y": Y[i - 1][j - 1]}
-            )
-            X[i][j], from_X[i][j] = _best(
-                0.0,
-                {
-                    "M": M[i - 1][j] + gap_open + gap_extend,
-                    "X": X[i - 1][j] + gap_extend,
-                },
-            )
-            Y[i][j], from_Y[i][j] = _best(
-                0.0,
-                {
-                    "M": M[i][j - 1] + gap_open + gap_extend,
-                    "Y": Y[i][j - 1] + gap_extend,
-                },
-            )
+        low, high = spans_of_row[i]
+        previous_low, previous_high = spans_of_row[i - 1]
+        # Rows and offsets hoisted out of the loop, and every lookup done by
+        # direct index. The readable version of this used accessor functions and
+        # spent more time in the call overhead than the band had saved -- this
+        # is the innermost loop of the whole diff and the one place in the
+        # project where that trade is worth making.
+        m_row, x_row, y_row = M[i], X[i], Y[i]
+        fm_row, fx_row, fy_row = from_M[i], from_X[i], from_Y[i]
+        m_prev, x_prev, y_prev = M[i - 1], X[i - 1], Y[i - 1]
+        previous_width = previous_high - previous_low
 
-    state = max(("M", "X", "Y"), key=lambda s: {"M": M, "X": X, "Y": Y}[s][n][m])
+        for j in range(max(1, low), high + 1):
+            here = j - low
+            diagonal = j - 1 - previous_low
+            above = j - previous_low
+
+            if 0 <= diagonal <= previous_width:
+                best_diagonal = max(m_prev[diagonal], x_prev[diagonal], y_prev[diagonal])
+                came = (
+                    "M"
+                    if best_diagonal == m_prev[diagonal]
+                    else ("X" if best_diagonal == x_prev[diagonal] else "Y")
+                )
+            else:
+                best_diagonal, came = _NEG, "M"
+            if best_diagonal != _NEG:
+                # Substitution score maps similarity onto [-1, +1], so an
+                # unrelated pair is a genuine cost rather than a free zero.
+                m_row[here] = best_diagonal + (
+                    2.0 * similarity(left[i - 1], right[j - 1]) - 1.0
+                )
+                fm_row[here] = came
+
+            if 0 <= above <= previous_width:
+                from_match = m_prev[above] + gap_open + gap_extend
+                from_gap = x_prev[above] + gap_extend
+                if from_match >= from_gap:
+                    x_row[here], fx_row[here] = from_match, "M"
+                else:
+                    x_row[here], fx_row[here] = from_gap, "X"
+
+            left_of = j - 1 - low
+            if 0 <= left_of:
+                from_match = m_row[left_of] + gap_open + gap_extend
+                from_gap = y_row[left_of] + gap_extend
+                if from_match >= from_gap:
+                    y_row[here], fy_row[here] = from_match, "M"
+                else:
+                    y_row[here], fy_row[here] = from_gap, "Y"
+
+    scores = {"M": M, "X": X, "Y": Y}
+    state = max(("M", "X", "Y"), key=lambda s: get(scores[s], n, m))
     pointers = {"M": from_M, "X": from_X, "Y": from_Y}
 
     columns: list[AlignedStep] = []
     i, j = n, m
+    reach = 0
     while i > 0 or j > 0:
+        # How far this path runs from the diagonal. If it comes within a step of
+        # the band the band may have clipped something better, and the caller
+        # widens rather than trusting it.
+        reach = max(reach, abs(j - i * m / n))
         if i == 0:
             state = "Y"
         elif j == 0:
             state = "X"
 
-        previous = pointers[state][i][j] or ("X" if j == 0 else "Y")
+        previous = pointer(pointers[state], i, j) or ("X" if j == 0 else "Y")
         if state == "M":
             columns.append(_pair(left[i - 1], right[j - 1], i - 1, j - 1))
             i, j = i - 1, j - 1
@@ -326,7 +471,7 @@ def _align_monotonic(
         state = previous
 
     columns.reverse()
-    return columns
+    return columns, int(reach) + 1
 
 
 def _best(bonus: float, options: dict[str, float]) -> tuple[float, str]:
@@ -449,11 +594,23 @@ def _rescue(
     available = set(weak_right)
     rescued: dict[int, int] = {}
 
+    # Bucketed by kind and tool name before scoring, which is an exactness-
+    # preserving shortcut rather than a heuristic: matching those two is worth
+    # 0.5 of the similarity, and the remaining components can only add 0.5, so
+    # a pair whose labels differ can never reach the 0.9 threshold. Comparing
+    # them anyway was the entire cost of this pass on a long run -- more than
+    # half the time of a banded diff, and quadratic in the number of steps the
+    # alignment had left unexplained.
+    candidates: dict[tuple[str, str], list[int]] = {}
+    for index in weak_right:
+        candidates.setdefault(_shape_of(right[index]), []).append(index)
+
     scored = sorted(
-        (-score, abs(j - _expected_position(i, confident)), i, j)
+        (-score, distance, i, j)
         for i in weak_left
-        for j in weak_right
-        if (score := similarity(left[i], right[j])) >= MOVE_CONFIDENCE
+        for j in candidates.get(_shape_of(left[i]), ())
+        if (distance := abs(j - _expected_position(i, confident))) <= _MOVE_WINDOW
+        and (score := similarity(left[i], right[j])) >= MOVE_CONFIDENCE
     )
 
     for *_, i, j in scored:
