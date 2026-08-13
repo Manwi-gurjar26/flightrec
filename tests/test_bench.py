@@ -244,8 +244,8 @@ def test_the_structure_metric_still_scores_something() -> None:
 
     assert results["delete"].structure_total == results["delete"].total
     assert results["adjacent-edit"].structure_total == results["adjacent-edit"].total
+    assert results["insert+delete"].structure_total == results["insert+delete"].total
     assert results["insert"].structure_total > 0
-    assert results["insert+delete"].structure_total > 0
 
 
 def test_an_unmatchable_step_is_never_reported_as_a_changed_result() -> None:
@@ -474,3 +474,27 @@ def test_cutting_later_sometimes_costs_more() -> None:
     assert transitions > 0
     assert regressions > 0, "if this ever hits zero the corpus stopped forking"
     assert regressions < transitions // 2, "but it should still be the exception"
+
+
+def test_insert_and_delete_reports_real_gaps_not_replacements() -> None:
+    """The class scored structure over 8 of 38 mutants until its injection changed.
+
+    A real recovery block spliced in at one point while two ordinary steps were
+    deleted at another gave the diff two edits it was entitled to read as a
+    single move -- ``fetch_page`` gone from here, ``fetch_page`` arrived there --
+    so ground truth had to exclude them. With an unmatchable injection there is
+    no move to read, and the added and removed steps are reported as exactly
+    that, at a distance from each other.
+    """
+    import random as _random
+
+    mutation = mutate(
+        record(0), recovery_block(), _random.Random(20240812), kind="insert+delete"
+    )
+    assert mutation is not None
+
+    diff = diff_runs(mutation.original, mutation.mutant)
+
+    assert diff.count(Op.INSERTED) == 2
+    assert diff.count(Op.REMOVED) == 2
+    assert mutation.structure_accuracy(diff) == 1.0

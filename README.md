@@ -547,11 +547,26 @@ tool name is enough to be confusable. That is a structural test, deliberately
 not the diff's own 0.9 threshold, which would be scoring the diff against its own
 opinion.
 
-**This is the point at which a benchmark starts lying to you**, so it is worth
-being blunt about the cost: that exclusion drops `insert+delete` from 38 scored
-cases to 8. The remaining 8 pass, and the class now reads `structure 100% (8/38)`
-rather than `100%`. Two tests guard the rule from being widened until nothing is
-left — one asserts the metric still scores whole classes, the other that it still
+**This is the point at which a benchmark starts lying to you**, so the cost was
+printed rather than absorbed: the exclusion dropped `insert+delete` from 38
+scored cases to 8, and the class read `structure 100% (8/38)` — a real number,
+measured over almost nothing. Every metric that does not apply to every mutant
+now carries its denominator for that reason.
+
+**Fixing that was a change to the mutation, not to the rule.** The exclusions
+were correct: a real recovery block spliced in at one point while two ordinary
+steps were deleted at another gives the diff two edits it is entitled to read as
+a single move — a `fetch_page` gone from here and a `fetch_page` arrived there is
+a move by any reasonable account. Loosening the rule would have scored the diff
+wrong for saying something true. Making the injected steps unmatchable removes
+the ambiguity instead of ruling on it, and the class now scores 38 of 38, with
+the added and removed steps reported as exactly that rather than paired up. The
+class exists to test a *non-constant offset* between two structural edits, which
+does not depend on what was inserted; `insert` still covers the realistic case
+where the block is a genuine recorded recovery.
+
+Two tests guard the exclusion rule from being widened until nothing is left —
+one asserts the metric still scores whole classes, the other that it still
 *fails* the class it should.
 
 ### The last one was not a scoring problem. It was a word.
@@ -690,7 +705,7 @@ change, a truncated run, a retry loop's worth of identical steps, and a swap of
 two neighbours.
 
 `blame` and `structure` do not apply to every mutant and print their
-denominators for that reason — `structure 100% (8/38)` is a different claim from
+denominators for that reason — `structure 100% (27/40)` is a different claim from
 `structure 100%`, and printing the first as the second is how a number gets
 quoted without its limits.
 

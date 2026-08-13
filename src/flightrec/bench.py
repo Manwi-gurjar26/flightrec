@@ -614,9 +614,24 @@ def _mutate_delete(rows: list[Row], block: list[Span], rng: random.Random):
 
 
 def _mutate_insert_and_delete(rows: list[Row], block: list[Span], rng: random.Random):
-    """Both, in different places, so the offset is not even constant."""
+    """Both, in different places, so the offset is not even constant.
+
+    The injected steps are made unmatchable, and that is what the class is worth
+    measuring. Splicing a real recovery block in at one point while deleting two
+    ordinary steps at another produces two edits the diff is entitled to read as
+    a single *move* -- a ``fetch_page`` gone from here and a ``fetch_page``
+    arrived there is a move by any reasonable account. Ground truth had to
+    exclude those as undecidable, which left the structure metric scoring 8 of
+    38 mutants: a real number, measured over almost nothing.
+
+    Making the insertion distinguishable removes the ambiguity rather than
+    ruling on it. The class exists to test a *non-constant offset* between two
+    structural edits, which does not depend on what was inserted; the realistic
+    case, where the block is a genuine recorded recovery, is what ``insert``
+    covers.
+    """
     at = rng.randrange(1, len(rows) // 3)
-    rows = rows[:at] + _inject(block) + rows[at:]
+    rows = rows[:at] + _inject([_make_distinct(s, at) for s in block]) + rows[at:]
     cut = rng.randrange(at + len(block) + 1, max(at + len(block) + 2, len(rows) - 2))
     rows = rows[:cut] + rows[cut + 2 :]
     changed = _change_a_tool(rows, rng, after=cut)
