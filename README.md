@@ -11,7 +11,7 @@ deterministically from any step, and diff two runs to find exactly where they di
 > the same task without the recording reproduces it in 8 of 40.**
 >
 > *Status: measured. `flightrec bench` produces this and every other number
-> below, in about five seconds, with no API key and no network.*
+> below, in a few seconds, with no API key and no network.*
 >
 > *This README was written before the code, deliberately, with each number as a
 > target and a defined measurement procedure. Two targets were met — the second
@@ -651,7 +651,8 @@ flightrec bench --json          # machine-readable
 | Metric | Measured | Baseline | Target | |
 |---|---|---|---|---|
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
-| **Divergence localization** | **100%** over 10 mutation classes (398/398) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
+| **Partial replay fidelity** | **100%** (528/528 cut points) | 41% — re-running and hoping the first N steps match | — | — |
+| **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~+95%** wall clock, **~8µs** per span | uninstrumented agent | < 5% wall clock | **missed** |
 
@@ -679,6 +680,12 @@ others disagree with it, deliberately:
 | `blame` | is the first divergence reported the real one? | 100% everywhere |
 | `structure` | are added and removed steps reported as added and removed? | 100% everywhere |
 
+Thirteen mutation classes now: insertion, deletion, both at once, two changes,
+reordering, tool substitution, an insertion butted against a deletion, a
+verbatim duplicate, several edits compounded, reworded arguments with one real
+change, a truncated run, a retry loop's worth of identical steps, and a swap of
+two neighbours.
+
 `blame` and `structure` do not apply to every mutant and print their
 denominators for that reason — `structure 100% (8/38)` is a different claim from
 `structure 100%`, and printing the first as the second is how a number gets
@@ -696,6 +703,17 @@ classes and a fourth metric took it to 99.5% and exposed a case the other three
 metrics were structurally unable to see. All four are back at 100% after fixing
 what that found — including one fix that was not to the aligner or the scoring
 but to the vocabulary the diff reports in.
+
+**The third round found nothing in the diff, and that is the result.** Three more
+mutation classes — a run that stops early, a retry loop's worth of identical
+steps, the smallest possible reordering — all score 100%. Reporting that is the
+job; inventing a failure would not be. What the round *did* find is that the
+wrong thing was being measured elsewhere: replay fidelity replayed each recording
+exactly one way, while the sentence the tool is sold on is "replay from step N".
+Sweeping every cut point — 528 of them — and demanding that each reproduces its
+prefix, serves exactly that many steps, and repeats byte-identically is a far
+stronger claim than the one that was on the table, and it is the claim a user
+actually relies on.
 
 **The overhead target was missed by a factor of about twenty, and the percentage
 is the wrong number to read.** Every step of the demo agent is local and finishes

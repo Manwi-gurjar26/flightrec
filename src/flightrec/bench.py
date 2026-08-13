@@ -34,6 +34,7 @@ from flightrec.spans import (
     SpanKind,
     first_divergence,
     step_signature,
+    trajectory,
 )
 
 DEFAULT_RUNS = 40
@@ -138,7 +139,68 @@ def measure_replay_fidelity(seeds: range) -> Measurement:
     )
 
 
-# --- 2. divergence localization ----------------------------------------------
+def measure_partial_replay_fidelity(seeds: range) -> Measurement:
+    """The stronger claim: replay from *any* step, not just from the start.
+
+    The metric above replays each recording one way. This one replays it at
+    every possible cut point and asks three things of each:
+
+    * the steps before the cut reproduce the recording exactly;
+    * exactly that many steps were served, so nothing was quietly re-executed;
+    * replaying the same cut twice is byte-identical.
+
+    All three, or the cut point does not count. "Replay from step N" is the
+    sentence the tool is sold on, and it was being measured at N=0.
+
+    The baseline is the same one as above, applied per cut: re-run the task
+    without the recording and see whether its first N steps happen to match.
+    """
+    good = 0
+    total = 0
+    baseline_good = 0
+    rng = random.Random(20240811)
+
+    for seed in seeds:
+        recorded = record(seed)
+        prefix = trajectory(recorded)
+        fresh = trajectory(record(rng.randrange(10_000, 1_000_000)))
+
+        for cut in range(len(prefix) + 1):
+            total += 1
+            if fresh[:cut] == prefix[:cut]:
+                baseline_good += 1
+
+            replayed = replay_run(recorded, from_step=cut)
+            if trajectory(replayed.run)[:cut] != prefix[:cut]:
+                continue
+            if replayed.served != cut:
+                continue
+            if replay_run(recorded, from_step=cut).run.canonical_json() != (
+                replayed.run.canonical_json()
+            ):
+                continue
+            good += 1
+
+    return Measurement(
+        name="Partial replay fidelity",
+        value=100.0 * good / total if total else 0.0,
+        unit="%",
+        baseline=100.0 * baseline_good / total if total else 0.0,
+        baseline_label="re-running the task and hoping the first N steps match",
+        detail=(
+            f"{good}/{total} cut points reproduced their prefix exactly, served "
+            f"exactly that many steps, and repeated byte-identically"
+        ),
+        caveat=(
+            "says nothing about the steps *after* the cut, which are supposed to "
+            "differ -- that is the point of cutting. The baseline scores above "
+            "zero only because a cut of 0 steps trivially matches, and because "
+            "runs that fire no faults share a prefix"
+        ),
+    )
+
+
+# --- 3. divergence localization ----------------------------------------------
 
 
 @dataclass
@@ -702,6 +764,48 @@ def _mutate_cosmetic_noise(rows: list[Row], block: list[Span], rng: random.Rando
     return rows, {changed} if changed is not None else set()
 
 
+def _mutate_truncate(rows: list[Row], block: list[Span], rng: random.Random):
+    """The run stops early, the way a crashed agent's does.
+
+    Partial runs are first-class in this tool -- the run whose process died
+    mid-flight is the one you opened it to look at -- so diffing a complete run
+    against a truncated one is an ordinary thing to ask for and was untested.
+    """
+    keep = rng.randrange(len(rows) // 2, len(rows) - 1)
+    changed = _change_a_tool(rows[:keep], rng)
+    return rows[:keep], {changed} if changed is not None else set()
+
+
+def _mutate_repeat_block(rows: list[Row], block: list[Span], rng: random.Random):
+    """A pair of steps repeated several times, the shape a retry loop leaves.
+
+    Aimed at the move pass, which resolves ties by distance. One duplicate has
+    one alternative; four copies of the same two steps have many, all equally
+    good, and the metric has to treat them as the same answer rather than score
+    a coin toss.
+    """
+    at = rng.randrange(1, max(2, len(rows) - 3))
+    repeated = [
+        (None, span.model_copy(deep=True)) for _ in range(3) for _, span in rows[at : at + 2]
+    ]
+    rows = rows[: at + 2] + repeated + rows[at + 2 :]
+    changed = _change_a_tool(rows, rng, after=at + 8)
+    return rows, {changed} if changed is not None else set()
+
+
+def _mutate_swap_adjacent(rows: list[Row], block: list[Span], rng: random.Random):
+    """Two neighbouring steps in the other order.
+
+    The smallest possible reordering, and the hardest to attribute: moving a
+    block leaves a long backbone to measure against, while swapping neighbours
+    leaves two equally good readings and nothing to break the tie.
+    """
+    at = rng.randrange(1, len(rows) - 2)
+    rows = rows[:at] + [rows[at + 1], rows[at]] + rows[at + 2 :]
+    changed = _change_a_tool(rows, rng)
+    return rows, {changed} if changed is not None else set()
+
+
 def _mutate_substitute(rows: list[Row], block: list[Span], rng: random.Random):
     """One tool call becomes a different tool call in the same slot."""
     candidates = [
@@ -733,6 +837,9 @@ MUTATORS = {
     "duplicate": _mutate_duplicate,
     "compound": _mutate_compound,
     "cosmetic-noise": _mutate_cosmetic_noise,
+    "truncate": _mutate_truncate,
+    "repeat-block": _mutate_repeat_block,
+    "swap-adjacent": _mutate_swap_adjacent,
 }
 
 
@@ -992,6 +1099,7 @@ def run_bench(runs: int = DEFAULT_RUNS, repeats: int = 40) -> list[Measurement]:
     seeds = range(runs)
     return [
         measure_replay_fidelity(seeds),
+        measure_partial_replay_fidelity(seeds),
         measure_divergence_localization(seeds),
         measure_replay_cost_saving(seeds),
         measure_overhead(repeats),

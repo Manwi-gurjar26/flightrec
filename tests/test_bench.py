@@ -21,6 +21,7 @@ from flightrec.bench import (
     measure_divergence_localization,
     measure_overhead,
     measure_replay_cost_saving,
+    measure_partial_replay_fidelity,
     measure_replay_fidelity,
     mutate,
     record,
@@ -43,6 +44,22 @@ def test_replay_fidelity_is_total_and_the_baseline_is_not() -> None:
 
     assert result.value == 100.0
     assert result.baseline < 100.0, "a baseline that also scores 100% compares nothing"
+
+
+def test_partial_replay_is_measured_at_every_cut_point() -> None:
+    """The claim is "replay from step N"; it was being measured at N=0.
+
+    Every cut point has to reproduce its prefix exactly, serve exactly that many
+    steps, and repeat byte-identically. A metric that only ever replays from the
+    start cannot see a cut that serves one step too many.
+    """
+    result = measure_partial_replay_fidelity(SEEDS)
+
+    assert result.value == 100.0
+    assert result.baseline < 100.0, "a baseline that also scores 100% compares nothing"
+    # More cut points than runs, or it is not sweeping anything.
+    scored = int(result.detail.split("/")[1].split()[0])
+    assert scored > len(SEEDS) * 5
 
 
 def test_divergence_localization_beats_index_pairing() -> None:
@@ -325,7 +342,7 @@ def test_cli_bench_emits_json(capsys) -> None:
     assert main(["bench", "--runs", "3", "--repeats", "2", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
 
-    assert len(payload) == 4
+    assert len(payload) == 5
     assert all(row["caveat"] for row in payload)
 
 
@@ -338,3 +355,38 @@ def test_cli_bench_prints_caveats_with_the_numbers(capsys) -> None:
     assert "Replay fidelity" in out
     assert "index-by-index" in out
     assert "trajectory-identical" in out
+
+
+def test_the_hard_mutation_classes_are_actually_present() -> None:
+    """Round three of hardening, pinned so the corpus cannot quietly shrink.
+
+    Each of these attacks something the earlier classes did not: a run that
+    stops early, a retry loop's worth of identical steps, and the smallest
+    possible reordering.
+    """
+    for kind in ("truncate", "repeat-block", "swap-adjacent"):
+        assert kind in MUTATORS
+
+
+def test_a_truncated_run_is_reported_as_a_truncated_run() -> None:
+    """Partial runs are first-class here, so diffing against one has to work."""
+    mutation = mutate(record(0), recovery_block(), random.Random(11), kind="truncate")
+    assert mutation is not None
+
+    diff = diff_runs(mutation.original, mutation.mutant)
+
+    assert len(mutation.mutant.steps()) < len(mutation.original.steps())
+    assert diff.count(Op.REMOVED) == len(mutation.removed)
+    assert diff.count(Op.INSERTED) == 0
+
+
+def test_a_repeat_block_leaves_many_indistinguishable_candidates() -> None:
+    """The move pass breaks ties by distance; this gives it several equal ones."""
+    mutation = mutate(record(0), recovery_block(), random.Random(12), kind="repeat-block")
+    assert mutation is not None
+
+    signatures = [step_signature(s) for s in mutation.mutant.steps()]
+    repeated = max(signatures.count(sig) for sig in signatures)
+
+    assert repeated >= 3, "the point of this class is many identical steps"
+    assert mutation.localized_by(diff_runs(mutation.original, mutation.mutant))
