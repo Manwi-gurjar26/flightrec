@@ -1,7 +1,8 @@
 # flightrec
 
 **A flight recorder for LLM agents.** Record every step of an agent run, replay it
-deterministically from any step, and diff two runs to find exactly where they diverged.
+deterministically from any step, diff two runs to find exactly where they
+diverged, and rank the steps it is only getting right by luck.
 
 ---
 
@@ -33,7 +34,7 @@ recovery that looks plausible and is wrong. Four steps later you get an answer t
 confidently incorrect, and the only artifact you have is 4,000 lines of JSON in a
 terminal scrollback.
 
-Three things are broken about debugging that:
+What is broken about debugging that:
 
 1. **Print-statement debugging stops working past about three steps.** The state you
    need to see is a tree, not a line.
@@ -41,6 +42,9 @@ Three things are broken about debugging that:
    is not a debugging strategy.
 3. **Nobody can answer "why did this run cost 8x more than the last one?"** — because
    nobody is lining the two runs up against each other.
+4. **One trace is one sample.** It cannot tell you which steps the agent is
+   handling reliably and which it is getting right by luck, and those are
+   different problems with different fixes.
 
 `flightrec` is the readable version: a timeline of every step showing what the agent was
 reasoning about, which tool it called, what came back, what it cost, and the precise
@@ -675,21 +679,22 @@ runs to produce the input that exposed it.
 
 ```
   your agent code
-        │  @trace / with span(...)
+        │  tracer.call(...) — the one line that makes a step replayable
         ▼
-  flightrec SDK ──── spans (OTel GenAI conventions) ────┐
-        │                                               │
-        │ replay: earlier steps served from recording   │
-        ▼                                               ▼
-  replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
-        ▲  │                                            │
-        │  └──► diff (NW + move recovery) ──┐           │
-        │                                   ▼           ▼
-        │                           web UI (Jinja2, no JS)
-        └───── POST /runs/<id>/replay ──────┤
-                                            · /runs/<id>  timeline, marked
-                                              recorded vs live on a replay
-                                            · /diff?left=&right=  aligned columns
+  flightrec SDK ─── spans (OTel GenAI conventions) ──► collector (FastAPI) ──► SQLite
+                                                                                 │
+                                     ┌──────────────── run trees ────────────────┘
+                                     ▼
+               ┌─────────────────────┼─────────────────────┐
+               ▼                     ▼                     ▼
+        replay engine        diff (NW + moves)        flaky report
+               │                     │              (many runs, one aligner)
+               └──────────┬──────────┘                 CLI only
+                          ▼
+                 web UI (Jinja2, no JS)
+                 · /runs/<id>               timeline, recorded vs live
+                 · /diff?left=&right=       aligned columns
+                 · POST /runs/<id>/replay   fork a run, stored as its own
 ```
 
 The UI is a closed loop: record with `flightrec demo`, then read, replay and
@@ -744,7 +749,7 @@ rather than leaving a reader to infer it from the name — the reproducibility t
 used to infer it, by looking for the word "overhead", and silently stopped
 covering the next timing metric that was added.
 
-Five things these numbers do not say, in descending order of how much they matter:
+What these numbers do not say, in descending order of how much it matters:
 
 **The 61% baseline is not a fair fight.** Half the mutation classes change no
 lengths at all, and on those index pairing is *correct* — it scores 100%, which
@@ -779,13 +784,15 @@ score. All four reach 100%, but only after the last one forced a change to what
 the diff *says*: see
 [Where the alignment gets it wrong](#where-the-alignment-gets-it-wrong).
 
-**These numbers have been revised down twice by making the corpus harsher**, and
-each revision found something. The generator started with one mutation class and
-scored 100%; six classes took it to 95% and broke the aligner in two ways; ten
-classes and a fourth metric took it to 99.5% and exposed a case the other three
-metrics were structurally unable to see. All four are back at 100% after fixing
-what that found — including one fix that was not to the aligner or the scoring
-but to the vocabulary the diff reports in.
+**These numbers have been revised down twice by making the corpus harsher**, over
+four rounds of trying, and every round found something. The generator started
+with one mutation class and scored 100%; six classes took it to 95% and broke the
+aligner in two ways; ten classes and a fourth metric took it to 99.5% and exposed
+a case the other three metrics were structurally unable to see; thirteen classes
+found nothing in the diff and instead found that replay fidelity was measuring
+the wrong thing. All four metrics are back at 100% after fixing what that turned
+up — including one fix that was not to the aligner or the scoring but to the
+vocabulary the diff reports in.
 
 **The third round found nothing in the diff, and that is the result.** Three more
 mutation classes — a run that stops early, a retry loop's worth of identical
@@ -833,12 +840,12 @@ Cost is dominated by span validation and UUID generation. Both are deliberate,
 and one tempting fix is not one: `Span.model_construct`, which skips pydantic
 validation, measured **125× slower** than the validated path.
 
-**Nothing here is measured on a long run, and that is the largest gap left.**
-The demo agent takes about four steps per city it is asked about, so
-`flightrec demo --cities 8` produces a 35-step run and `--cities 12` a 55-step
-one. Every other number on this page comes from the 11-step default. Stretching
-the task turned up the one scaling fact worth stating plainly: **alignment is
-quadratic.** Diffing grows 15–20× while the run grows 5× — it is a timing ratio,
+**Every number above the next two comes from an 11-step run.** The demo agent
+takes about four steps per city it is asked about, so `flightrec demo --cities 8`
+produces a 35-step run and `--cities 12` a 55-step one — the dial exists because
+a tool measured only at eleven steps says nothing about an agent that loops.
+Stretching the task turned up the one scaling fact worth stating plainly:
+**alignment is quadratic.** Diffing grows 15–20× while the run grows 5× — it is a timing ratio,
 so it moves between runs — while replay stays linear. The harness reports both the banded figure and what the full table would
 have cost, so the saving is checkable rather than claimed:
 
@@ -919,9 +926,17 @@ because a quarter of runs happen to fire no faults and land on the same clean
 trajectory. Against a real provider, which offers no seed at all, the baseline
 would be worse than this rather than better.
 
-The demo agent used for all measurements is committed (`examples/research_agent.py`) and
-runs against a deterministic stub model by default, so anyone can reproduce these numbers
-without an API key.
+The demo agent used for all measurements is committed
+(`src/flightrec/demo/agent.py`, with `examples/research_agent.py` as a script that
+runs it) and works against a deterministic stub model, so anyone can reproduce
+these numbers without an API key.
+
+**What none of them cover: a real provider, a real agent, and a run of hundreds
+of steps.** The corpus is a stub model with seeded faults, which is what makes it
+reproducible and is also the boundary of what it can tell you. The engine is not
+limited that way — `examples/replay_your_own_agent.py` records and replays an
+agent this library has never seen — but nothing on this page has been measured
+against one.
 
 ## Build status
 
