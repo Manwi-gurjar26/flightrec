@@ -97,8 +97,8 @@ browser primitive.
 *(The sections below are the point of the project: what was tried first, why
 it failed, what replaced it. They are written after the fact and they are not a
 success story — several of the bugs recorded here were found by measuring
-something the tests already said was fine, and section 3 ends with two failures
-that are still failures.)*
+something the tests already said was fine, and each section keeps the wrong turn
+that preceded the fix.)*
 
 ### 0. To replay a call, the library has to *make* it
 
@@ -259,11 +259,12 @@ recorded one, so divergence is a visible property of every step, not a footnote.
 What using it changed: **"divergent" was not a fine enough distinction.** The
 first version marked every span in a replay as `replayed` and everything past
 the edit point as `divergent`, which reads as "these steps came from the
-recording, those didn't" — and that is wrong. A model call is *re-executed* even
-in a perfectly faithful replay; only tool results are served from the recording.
-Labelling a re-executed model call as recorded data misrepresents provenance on
-exactly the steps a user is trying to reason about. There are now three states,
-and the timeline shows which is which:
+recording, those didn't" — and that was wrong at the time, because only tool
+results were being served and every model call was re-executed. Labelling a
+re-executed model call as recorded data misrepresents provenance on exactly the
+steps a user is trying to reason about. (Model calls before the edit point are
+served too now — see the cost measurement below, which is what forced it.) There
+are three states, and the timeline shows which is which:
 
 | Label | Meaning |
 |---|---|
@@ -281,12 +282,13 @@ saying it is not a recording, and the run list marks replays before you click
 into one, because the list is where a run gets trusted.
 
 **The replay button is not offered on runs it would lie about.** The engine
-rebuilds the demo agent from the seed on the root span, so a run ingested from
-somebody else's agent has nothing for it to reconstruct. Replaying one anyway
-would build the wrong program, feed it this recording, and store something that
-looks like a replay and is a replay of nothing. The timeline says why instead,
-and the guard is enforced on the request rather than by hiding the button — a
-hidden control is not a check.
+itself drives any agent (section 0), but an HTTP request cannot hand the server
+one to drive: a browser has no way to pass a Python object, so the button only
+works for agents the server can construct itself. Pressing it on a run ingested
+from somebody else's agent would build the wrong program, feed it this recording,
+and store something that looks like a replay and is a replay of nothing. The
+timeline says why instead, and the guard is enforced on the request rather than
+by hiding the button — a hidden control is not a check.
 
 **What the cost measurement then found, which changed the design.** The first
 implementation served tool results from the recording and re-executed every
@@ -481,7 +483,9 @@ substitutions cost −1.2. It could be made to prefer gapping, except that
 substitution — same shape, same similarity of about 0.2 — and the `substitute`
 class exists because pairing those is what the diff is supposed to do. The two
 expectations contradict each other. Tuning until both pass is not possible;
-picking one and calling the other a limitation is honest.
+picking one and calling the other a limitation is honest. *(That conclusion was
+wrong, and how it was wrong is the best thing in this README: see
+[The last one was not a scoring problem](#the-last-one-was-not-a-scoring-problem-it-was-a-word).)*
 
 Two more corrections, both to the benchmark rather than the code:
 
@@ -673,7 +677,7 @@ flightrec bench --json          # machine-readable
 | **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
 | **Replay cost saving** | **25%** at the midpoint, **77%** at 90%, swept across every cut point | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~8µs per span**; under 5% once a step takes ~250µs | uninstrumented agent | < 5% wall clock | **missed on this agent** |
-| **Cost at length** | diffing grows **~20×** while the run grows 5×; banding makes it ~1.8× faster at 55 steps and ~4× at 600 | growth in steps | — | quadratic, banded |
+| **Cost at length** | diffing grows **15–20×** while the run grows 5×; banding makes it ~1.8× faster at 55 steps and ~4× at 600 | growth in steps | — | quadratic, banded |
 
 The first four are exact and reproduce on any machine — they are counts, and the
 seeds are fixed. The last two are timing measurements and move by a few percent
@@ -778,14 +782,15 @@ The demo agent takes about four steps per city it is asked about, so
 `flightrec demo --cities 8` produces a 35-step run and `--cities 12` a 55-step
 one. Every other number on this page comes from the 11-step default. Stretching
 the task turned up the one scaling fact worth stating plainly: **alignment is
-quadratic.** Diffing grows ~16× while the run grows 5×, reaching 65ms at 55
-steps, while replay stays linear at 2ms.
+quadratic.** Diffing grows 15–20× while the run grows 5× — it is a timing ratio,
+so it moves between runs — while replay stays linear. The harness reports both the banded figure and what the full table would
+have cost, so the saving is checkable rather than claimed:
 
 ```
- 11 steps   diff    4.12ms   replay   1.04ms
- 19 steps   diff    6.29ms   replay   1.03ms
- 35 steps   diff   28.71ms   replay   1.31ms
- 55 steps   diff   65.23ms   replay   2.00ms
+ 11 steps   diff    1.59ms   (unbanded     1.57ms)   replay   0.45ms
+ 19 steps   diff    4.86ms   (unbanded     4.79ms)   replay   0.88ms
+ 35 steps   diff   14.52ms   (unbanded    23.37ms)   replay   1.37ms
+ 55 steps   diff   31.31ms   (unbanded    55.31ms)   replay   2.31ms
 ```
 
 That is Needleman–Wunsch, not a defect: an n-by-m table with a string similarity
@@ -873,6 +878,19 @@ without an API key.
 - [x] 7. Deterministic replay
 - [x] 8. Run diff with sequence alignment
 - [x] 9. Measurement harness → real numbers in this README
+
+The nine steps were the plan written before the code. What followed came from
+using the thing, and each item is a section above rather than a bullet here:
+
+- [x] Replay any agent, not just the demo one — `tracer.call`, and an engine that
+      drives a callable you supply
+- [x] Refuse a replay with un-servable steps in the middle of it, instead of
+      returning one that is quietly part live
+- [x] Show replay provenance in the timeline and the run list, not only in the CLI
+- [x] A diff view and replay controls in the browser, closing the loop
+- [x] Four rounds of making the benchmark harsher, which found two real bugs, one
+      metric blind spot, and two claims that were arithmetic rather than measurement
+- [x] An adjustable task length, and a banded alignment for the long runs it exposed
 
 ## What I would do with two more weeks
 
