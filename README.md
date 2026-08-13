@@ -655,7 +655,7 @@ flightrec bench --json          # machine-readable
 | **Replay fidelity** | **100%** (40/40) | 20% — re-running the task without the recording | 100% vs ~0% | met |
 | **Partial replay fidelity** | **100%** (528/528 cut points) | 41% — re-running and hoping the first N steps match | — | — |
 | **Divergence localization** | **100%** over 13 mutation classes (518/518) | 61% — index-by-index `zip()` pairing | alignment ≫ zip | met |
-| **Replay cost saving** | **25%** cutting at the midpoint, **77%** cutting at 90% | 0% — re-running from step 0 | — | — |
+| **Replay cost saving** | **25%** at the midpoint, **77%** at 90%, swept across every cut point | 0% — re-running from step 0 | — | — |
 | **Overhead** | **~8µs per span**; under 5% once a step takes ~250µs | uninstrumented agent | < 5% wall clock | **missed on this agent** |
 
 The first four are exact and reproduce on any machine — they are counts, and the
@@ -753,11 +753,25 @@ Cost is dominated by span validation and UUID generation. Both are deliberate,
 and one tempting fix is not one: `Span.model_construct`, which skips pydantic
 validation, measured **125× slower** than the validated path.
 
-**The replay saving is smaller than "skip half the steps" suggests, for a
-structural reason.** A model call's prompt carries the whole transcript so far,
-so the second half of a run costs far more than the first. Cutting at the
-midpoint skips half the steps and a quarter of the tokens. The saving scales with
-*where* you cut, not how many steps you skip — hence both numbers in the table.
+**The replay saving is smaller than "skip half the steps" suggests, and it is
+not a straight line.** A model call's prompt carries the whole transcript so far,
+so the second half of a run costs far more than the first. The harness sweeps
+every cut point rather than sampling two:
+
+```
+cut at    0%   skips   0% of steps   spends  31,955 tokens   saves   0.0%
+cut at   30%   skips  28% of steps   spends  25,867 tokens   saves  19.1%
+cut at   50%   skips  52% of steps   spends  23,902 tokens   saves  25.2%
+cut at   70%   skips  70% of steps   spends  15,473 tokens   saves  51.6%
+cut at   90%   skips  92% of steps   spends   7,509 tokens   saves  76.5%
+```
+
+**And it is not monotonic, which two points could never have shown.** Cutting one
+step *later* cost *more* at 20 of 488 adjacent cut points. The reason is not
+noise: past the cut the agent runs live, and a later cut can send it down a
+different, longer path — in this corpus, one where it guesses a second URL and
+adds two steps. "Cut later to save more" is a tendency, not a rule, and the tool
+should not imply otherwise to somebody deciding where to fork a run.
 
 **Replay fidelity is trajectory-identical, not byte-identical.** Span IDs and
 timestamps are excluded from the comparison because a replay cannot recover the

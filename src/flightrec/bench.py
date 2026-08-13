@@ -903,50 +903,108 @@ def _perturb(value: Any) -> Any:
 # --- 3. replay cost saving ----------------------------------------------------
 
 
+@dataclass
+class CostPoint:
+    """What replaying from one point in the run costs, aggregated over the corpus."""
+
+    cut_fraction: float
+    steps_skipped: int
+    steps_total: int
+    spent: int
+    full: int
+
+    @property
+    def saving_pct(self) -> float:
+        return 100.0 * (1.0 - self.spent / self.full) if self.full else 0.0
+
+    @property
+    def skipped_pct(self) -> float:
+        return 100.0 * self.steps_skipped / self.steps_total if self.steps_total else 0.0
+
+    def line(self) -> str:
+        return (
+            f"cut at {self.cut_fraction * 100:>4.0f}%   skips {self.skipped_pct:>3.0f}% "
+            f"of steps   spends {self.spent:>7,} tokens   saves {self.saving_pct:>5.1f}%"
+        )
+
+
+def cost_saving_curve(seeds: range) -> tuple[list[CostPoint], int, int]:
+    """Sweep every cut point, then aggregate into deciles.
+
+    Two numbers were not enough. The saving is not proportional to the steps
+    skipped -- a model call carries the whole transcript, so the second half of
+    a run costs far more than the first -- and reporting a midpoint and a 90%
+    figure showed that only as a pair of dots with a straight line implied
+    between them. It is not straight, and it is not even monotonic.
+
+    Returns the curve, the number of adjacent cut points where cutting *later*
+    cost *more*, and how many transitions were examined.
+    """
+    buckets = {d: CostPoint(d / 10, 0, 0, 0, 0) for d in range(11)}
+    regressions = 0
+    transitions = 0
+
+    for seed in seeds:
+        recorded = record(seed)
+        steps = len(recorded.steps())
+        spent_at = {}
+
+        for cut in range(steps + 1):
+            replayed = replay_run(recorded, from_step=cut)
+            spent_at[cut] = sum(
+                step.total_tokens
+                for step in replayed.run.steps()
+                if not step.attr(FR_SERVED)
+            )
+
+        for cut in range(steps):
+            transitions += 1
+            if spent_at[cut + 1] > spent_at[cut]:
+                regressions += 1
+
+        for decile, point in buckets.items():
+            cut = max(0, min(steps, round(decile / 10 * steps)))
+            point.steps_skipped += cut
+            point.steps_total += steps
+            point.spent += spent_at[cut]
+            point.full += recorded.total_tokens
+
+    return [buckets[d] for d in range(11)], regressions, transitions
+
+
 def measure_replay_cost_saving(seeds: range) -> Measurement:
-    """Tokens actually spent replaying from the midpoint vs. re-running the task.
+    """Tokens actually spent replaying from each point vs. re-running the task.
 
     A step served from the recording bills nothing, so only the live steps past
     the edit point count. This is the number that decides whether anybody edits
     step 7 more than once.
     """
-    def spend(fraction: float) -> tuple[int, int]:
-        spent = full = 0
-        for seed in seeds:
-            recorded = record(seed)
-            steps = len(recorded.steps())
-            cut = max(1, min(steps - 1, int(steps * fraction)))
-            replayed = replay_run(recorded, from_step=cut)
-            spent += sum(
-                step.total_tokens
-                for step in replayed.run.steps()
-                if not step.attr(FR_SERVED)
-            )
-            full += recorded.total_tokens
-        return spent, full
-
-    spent, full = spend(0.5)
-    late_spent, late_full = spend(0.9)
-    saving = 100.0 * (1.0 - spent / full) if full else 0.0
-    late_saving = 100.0 * (1.0 - late_spent / late_full) if late_full else 0.0
+    curve, regressions, transitions = cost_saving_curve(seeds)
+    midpoint = curve[5]
+    late = curve[9]
 
     return Measurement(
         name="Replay cost saving",
-        value=saving,
+        value=midpoint.saving_pct,
         unit="%",
         baseline=0.0,
         baseline_label="re-running from step 0",
         detail=(
-            f"{spent:,} tokens spent vs {full:,} to re-run, cutting at the midpoint; "
-            f"cutting at 90% saves {late_saving:.1f}%"
+            f"{midpoint.spent:,} tokens spent vs {midpoint.full:,} to re-run, "
+            f"cutting at the midpoint; cutting at 90% saves "
+            f"{late.saving_pct:.1f}%. Cutting later cost *more* at "
+            f"{regressions} of {transitions} adjacent cut points"
         ),
+        breakdown=[point.line() for point in curve],
         caveat=(
-            "less than the half you would expect from a midpoint cut, and the "
-            "reason is structural: a model call's prompt carries the whole "
-            "transcript so far, so the second half of a run is far more "
-            "expensive than the first. Saving scales with where you cut, not "
-            "with how many steps you skip. Tokens only -- not latency, and not "
-            "the agent's own logic, which is re-executed either way"
+            "far less than the steps skipped would suggest, for a structural "
+            "reason: a model call's prompt carries the whole transcript, so the "
+            "second half of a run costs much more than the first -- skipping "
+            "half the steps saves about a quarter of the tokens. And the curve "
+            "is not monotonic. Past the cut the agent runs live and can take a "
+            "*different, longer* path, so cutting one step later sometimes costs "
+            "more than cutting earlier. Tokens only -- not latency, and not the "
+            "agent's own logic, which is re-executed either way"
         ),
     )
 

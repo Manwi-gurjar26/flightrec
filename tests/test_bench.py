@@ -436,3 +436,41 @@ def test_the_overhead_measurement_reports_its_spread() -> None:
 
     assert "across" in result.detail, "the range of observed runs has to be shown"
     assert result.breakdown, "and the curve, which is the actual answer"
+
+
+def test_the_cost_saving_is_swept_not_sampled_at_two_points() -> None:
+    """Two points imply a straight line between them. This one is not straight.
+
+    A model call's prompt carries the whole transcript, so the second half of a
+    run costs far more than the first -- skipping half the steps saves about a
+    quarter of the tokens. Reporting a midpoint and a 90% figure showed that as
+    two dots.
+    """
+    from flightrec.bench import cost_saving_curve
+
+    curve, _, _ = cost_saving_curve(SEEDS)
+
+    assert len(curve) == 11
+    assert curve[0].saving_pct == 0.0, "cutting at 0 saves nothing"
+    assert curve[-1].saving_pct == 100.0, "cutting at the end runs nothing"
+    midpoint = next(p for p in curve if p.cut_fraction == 0.5)
+    assert midpoint.skipped_pct > 2 * midpoint.saving_pct, (
+        "the whole point: steps skipped and tokens saved are not the same thing"
+    )
+
+
+def test_cutting_later_sometimes_costs_more() -> None:
+    """The finding the sweep was for, and the reason two points could not see it.
+
+    Past the cut the agent runs live and can take a *different* path -- in this
+    corpus, one that guesses a second URL and adds two steps. So replaying from
+    step 7 can spend more than replaying from step 6, and "cut later to save
+    more" is not a rule.
+    """
+    from flightrec.bench import cost_saving_curve
+
+    _, regressions, transitions = cost_saving_curve(SEEDS)
+
+    assert transitions > 0
+    assert regressions > 0, "if this ever hits zero the corpus stopped forking"
+    assert regressions < transitions // 2, "but it should still be the exception"
