@@ -18,6 +18,10 @@ server = [
     "uvicorn[standard]>=0.27",
     "jinja2>=3.1",
     "httpx>=0.27",
+    # Required to read a posted form. Starlette asserts on it even for plain
+    # urlencoded bodies, so the replay controls cannot work without it -- and
+    # the UI has no JavaScript, so a form is the only way to start a replay.
+    "python-multipart>=0.0.9",
 ]
 dev = [
     "pytest>=8.0",

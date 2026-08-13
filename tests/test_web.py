@@ -227,6 +227,91 @@ def test_an_ordinary_run_carries_no_provenance_noise(store):
     assert not any(step.provenance for step in view.steps)
 
 
+# --- replay from the browser --------------------------------------------------
+
+
+@pytest.fixture
+def no_redirect(store):
+    return TestClient(create_app(store=store), follow_redirects=False)
+
+
+def test_replaying_from_the_browser_stores_a_run_and_redirects(no_redirect, store):
+    run = make_run(seed=1)
+    store.add_run(run)
+
+    response = no_redirect.post(f"/runs/{run.run_id}/replay", data={"from_step": "4"})
+
+    assert response.status_code == 303, "POST-redirect-GET, so refresh cannot re-run it"
+    location = response.headers["location"]
+    assert location != f"/runs/{run.run_id}", "a replay is its own run"
+
+    replay = store.get_run(location.rsplit("/", 1)[-1])
+    assert replay is not None
+    assert no_redirect.get(location).status_code == 200
+
+
+def test_a_browser_replay_is_labelled_like_any_other(no_redirect, store):
+    """It has to arrive marked, or the UI has a second way to be misled."""
+    run = make_run(seed=1)
+    store.add_run(run)
+
+    location = no_redirect.post(
+        f"/runs/{run.run_id}/replay", data={"from_step": "4"}
+    ).headers["location"]
+    page = no_redirect.get(location).text
+
+    assert "This is a replay, not a recording" in page
+    assert ">recorded<" in page and ">live<" in page
+    assert any(s.is_replay for s in store.list_runs())
+
+
+def test_a_run_the_engine_cannot_rebuild_is_not_offered_a_replay(no_redirect, store):
+    """The engine only knows the demo agent, so the button must not lie.
+
+    A run ingested from somebody else's agent has no seed to reconstruct from.
+    Replaying it anyway would build the wrong program, serve it this recording,
+    and store something that looks like a replay of nothing.
+    """
+    tracer = Tracer(sink=MemorySink(), clock=VirtualClock(), trace_id="foreign")
+    with tracer.span("my_own_agent", kind=SpanKind.AGENT):
+        with tracer.span("chat", kind=SpanKind.LLM):
+            pass
+    store.add_run(tracer.collect())
+
+    page = no_redirect.get("/runs/foreign").text
+    assert 'method="post"' not in page
+    assert "cannot be replayed" in page
+
+    # And the guard holds against a hand-made POST, not just a hidden button.
+    before = store.count_runs()
+    assert no_redirect.post("/runs/foreign/replay", data={}).status_code == 400
+    assert store.count_runs() == before
+
+
+def test_a_bad_replay_form_explains_itself(no_redirect, store):
+    run = make_run(seed=1)
+    store.add_run(run)
+
+    response = no_redirect.post(f"/runs/{run.run_id}/replay", data={"from_step": "abc"})
+
+    assert response.status_code == 400
+    assert "have to be numbers" in response.text
+    assert store.count_runs() == 1, "a rejected form must not store anything"
+
+
+def test_replaying_a_missing_run_is_404(no_redirect):
+    assert no_redirect.post("/runs/nope/replay", data={}).status_code == 404
+
+
+def test_the_replay_form_needs_no_javascript(client, store):
+    store.add_run(make_run(seed=1))
+    html = client.get("/runs/run-1").text
+
+    assert 'action="/runs/run-1/replay"' in html
+    assert 'method="post"' in html
+    assert "<script" not in html
+
+
 def test_diff_page_aligns_two_runs(client, store):
     """The diff was command-line only for two build steps.
 

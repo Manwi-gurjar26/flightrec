@@ -64,6 +64,20 @@ header.top p { margin: 0; color: var(--muted); font-size: 13px; }
   border: 1px solid var(--border); background: var(--panel); color: var(--fg); }
 .compare button { cursor: pointer; color: var(--accent); }
 
+details.panel { border: 1px solid var(--border); border-radius: 6px; }
+details.panel > summary { padding: 10px 12px; cursor: pointer; font-size: 13px; }
+.replay-form { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px; margin: 8px 0 12px; }
+.replay-form label { display: flex; flex-direction: column; gap: 4px; font-size: 11px;
+                     text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.replay-form label.check { flex-direction: row; align-items: center; text-transform: none;
+                           letter-spacing: 0; font-size: 12px; }
+.replay-form input[type=number] { width: 110px; }
+.replay-form input[type=text] { width: 260px; }
+.replay-form input, .replay-form button {
+  font-family: var(--mono); font-size: 12px; padding: 5px 8px; border-radius: 5px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--fg); }
+.replay-form button { cursor: pointer; color: var(--accent); background: var(--panel); }
+
 /* Diff rows. Steps that match are dimmed rather than hidden: a run of quiet
    rows is what makes the loud ones findable, and collapsing them would hide
    the thing a reader uses to judge whether the alignment is sane. */

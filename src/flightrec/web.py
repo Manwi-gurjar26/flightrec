@@ -92,6 +92,16 @@ class TimelineView:
             return "partial"
         return "error" if self.error_count else "ok"
 
+    replayable: bool = False
+    """Can the replay engine actually rebuild this run?
+
+    Only the demo agent, today. ``replay_run`` reconstructs a ``ResearchAgent``
+    from the seed on the root span, so a run ingested from somebody else's agent
+    cannot be replayed -- the engine would build the wrong program and serve it
+    the recording. Offering the button anyway would be worse than not having it:
+    it would produce a plausible run that is not a replay of anything.
+    """
+
     @property
     def is_replay(self) -> bool:
         return any(step.provenance for step in self.steps)
@@ -225,7 +235,22 @@ def build_timeline(run: Run) -> TimelineView:
         complete=bool(roots) and roots[0].end_time is not None,
         root_name=roots[0].name if roots else None,
         metadata=run.metadata,
+        replayable=is_replayable(run),
     )
+
+
+def is_replayable(run: Run) -> bool:
+    """Does this recording carry what the replay engine needs to rebuild it?
+
+    The engine reconstructs the demo agent from the seed on the root span, so
+    the honest answer for anything else is no. Checked here rather than
+    discovered halfway through a replay, because a half-built run stored in the
+    database is harder to explain than a button that is not offered.
+    """
+    for span in run.ordered_spans():
+        if span.kind is SpanKind.AGENT:
+            return span.name == "research_agent" and span.attr("flightrec.seed") is not None
+    return False
 
 
 def _build_step(span: Span, max_duration: float, max_tokens: int) -> StepView:

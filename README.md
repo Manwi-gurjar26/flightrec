@@ -57,7 +57,9 @@ thing*.
   a label on every step saying whether it came out of the recording or was really
   executed just now.
 - **Replay.** Re-run from step N with every earlier step served from the recording. Change
-  one prompt and see the effect without paying for the first six steps again.
+  one prompt and see the effect without paying for the first six steps again. From
+  the timeline page or `flightrec replay`; either way the result is stored as its
+  own run and labelled step by step.
 - **Diff.** Put two runs side by side, align their steps properly, and point at the first
   genuine divergence — in the browser at `/diff`, or `flightrec diff` on the
   command line. Matching steps are dimmed rather than hidden, because a run of
@@ -193,6 +195,14 @@ section was being enforced in the interface nobody was looking at. Every step of
 a replay now carries its label in the timeline, the page opens with a banner
 saying it is not a recording, and the run list marks replays before you click
 into one, because the list is where a run gets trusted.
+
+**The replay button is not offered on runs it would lie about.** The engine
+rebuilds the demo agent from the seed on the root span, so a run ingested from
+somebody else's agent has nothing for it to reconstruct. Replaying one anyway
+would build the wrong program, feed it this recording, and store something that
+looks like a replay and is a replay of nothing. The timeline says why instead,
+and the guard is enforced on the request rather than by hiding the button — a
+hidden control is not a check.
 
 **What the cost measurement then found, which changed the design.** The first
 implementation served tool results from the recording and re-executed every
@@ -513,14 +523,21 @@ labelling.
         │ replay: earlier steps served from recording   │
         ▼                                               ▼
   replay engine  ◄──── run trees ────  collector (FastAPI) ──► SQLite
-        │                                               │
-        └──► diff (Needleman–Wunsch + moves) ──┐        │
-                                               ▼        ▼
-                                       web UI (Jinja2, no JS)
-                                       · /runs/<id>  timeline, marked
-                                         recorded vs live on a replay
-                                       · /diff?left=&right=  aligned columns
+        ▲  │                                            │
+        │  └──► diff (NW + move recovery) ──┐           │
+        │                                   ▼           ▼
+        │                           web UI (Jinja2, no JS)
+        └───── POST /runs/<id>/replay ──────┤
+                                            · /runs/<id>  timeline, marked
+                                              recorded vs live on a replay
+                                            · /diff?left=&right=  aligned columns
 ```
+
+The UI is a closed loop: record with `flightrec demo`, then read, replay and
+compare without leaving the browser. Every control is a plain HTML form, because
+there is no JavaScript to lean on — the replay form is a `POST` followed by a
+redirect, so refreshing the result page cannot quietly run the agent a second
+time.
 
 That diagram was wrong for six build steps and is worth keeping the correction
 visible: it said "Jinja2 + HTMX", and HTMX appears nowhere in the codebase —

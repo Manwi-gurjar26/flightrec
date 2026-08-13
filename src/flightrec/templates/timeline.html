@@ -96,6 +96,10 @@
 </p>
 {% endif %}
 
+{% if error %}
+<p class="notice" style="margin-bottom:16px">{{ error }}</p>
+{% endif %}
+
 {% if view.is_replay %}
 <p class="notice" style="margin-bottom:16px">
   <strong>This is a replay, not a recording.</strong>
@@ -177,4 +181,43 @@
 {% if not view.steps %}
   <p class="empty">This run recorded no model or tool calls.</p>
 {% endif %}
+
+<details class="panel" style="margin-top:26px">
+  <summary><strong>Replay this run</strong></summary>
+  <div class="detail">
+  {% if not view.replayable %}
+    <p class="muted small">
+      This run cannot be replayed. The engine rebuilds the demo agent from the
+      seed on the root span, so a recording ingested from another agent has
+      nothing for it to reconstruct &mdash; offering the button anyway would
+      produce a plausible run that is a replay of nothing.
+    </p>
+  {% else %}
+    {# POST, not GET: a replay past the edit point executes real calls and
+       writes a new run, so it must not be repeatable by refreshing. #}
+    <form action="/runs/{{ view.run_id }}/replay" method="post" class="replay-form">
+      <label>From step
+        <input type="number" name="from_step" min="0" max="{{ view.step_count - 1 }}"
+               placeholder="all recorded">
+      </label>
+      <label>Task
+        <input type="text" name="task" placeholder="leave blank to keep the recorded one">
+      </label>
+      <label>Temperature
+        <input type="number" name="temperature" step="0.1" min="0" placeholder="as recorded">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="strict"> Stop at the edit point
+      </label>
+      <button type="submit">Replay</button>
+    </form>
+    <p class="muted small">
+      Steps before the edit point are served from this recording and cost
+      nothing. Everything from it onward is executed for real, now &mdash; the
+      replay is stored as its own run and labelled step by step.
+      With <em>stop at the edit point</em>, nothing past it runs at all.
+    </p>
+  {% endif %}
+  </div>
+</details>
 {% endblock %}
