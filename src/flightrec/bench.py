@@ -464,7 +464,9 @@ class Mutation:
         deliberately not the diff's own 0.9, which would be scoring the diff
         against its own opinion. It leaves the genuinely unambiguous case
         scored: a step whose tool appears nowhere in the other run has a fact of
-        the matter, and ``adjacent-edit`` still fails on it.
+        the matter, and ``adjacent-edit`` is built to produce exactly that. It
+        failed on it for a while, until the diff learned to say ``replaced``
+        instead of ``changed``.
 
         ``None`` comes back when nothing decidable is left.
         """
